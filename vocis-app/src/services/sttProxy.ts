@@ -78,6 +78,6 @@ export const STTProxy = {
   async getDirectWebSocketUrl(): Promise<string | null> {
     const apiKey = await SecureStorage.getApiKey();
     if (!apiKey) return null;
-    return `wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=${apiKey}`;
+    return `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${apiKey}`;
   },
 };

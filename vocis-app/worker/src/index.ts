@@ -159,25 +159,46 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // Create WebSocket pair for the client
   const [client, server] = Object.values(new WebSocketPair());
 
-  // Connect upstream to ElevenLabs with the real API key
-  const upstreamUrl = `wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=${env.ELEVENLABS_API_KEY}`;
-
   // Accept the client connection immediately
   server.accept();
 
-  // Set up upstream connection
-  const upstream = new WebSocket(upstreamUrl);
+  // Connect upstream to ElevenLabs using fetch-based WebSocket upgrade.
+  // This allows us to pass the xi-api-key header (new WebSocket() cannot).
+  // Cloudflare fetch() requires https:// — the Upgrade header handles WS upgrade
+  const upstreamUrl = 'https://api.elevenlabs.io/v1/speech-to-text/stream';
 
-  // Track connection state
-  let upstreamReady = false;
+  let upstream: WebSocket;
+  try {
+    const upstreamResponse = await fetch(upstreamUrl, {
+      headers: {
+        'Upgrade': 'websocket',
+        'xi-api-key': env.ELEVENLABS_API_KEY,
+      },
+    });
+
+    const ws = upstreamResponse.webSocket;
+    if (!ws) {
+      server.close(1011, 'Failed to establish upstream WebSocket connection');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    upstream = ws;
+    upstream.accept();
+  } catch {
+    server.close(1011, 'Failed to connect to speech-to-text service');
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Track connection state for buffering early client messages
+  let upstreamReady = true; // Already accepted, so ready immediately
   const pendingMessages: (string | ArrayBuffer)[] = [];
 
   // Relay: client → upstream
   server.addEventListener('message', (event) => {
-    if (upstreamReady) {
+    try {
       upstream.send(event.data);
-    } else {
-      pendingMessages.push(event.data);
+    } catch {
+      // Upstream may have closed
     }
   });
 
@@ -190,14 +211,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   });
 
   // Relay: upstream → client
-  upstream.addEventListener('open', () => {
-    upstreamReady = true;
-    for (const msg of pendingMessages) {
-      upstream.send(msg);
-    }
-    pendingMessages.length = 0;
-  });
-
   upstream.addEventListener('message', (event: MessageEvent) => {
     try {
       server.send(event.data);
