@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, Alert } from 'react-native';
+import { View, Text, StyleSheet, FlatList, Alert, Platform, TouchableOpacity } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Colors, Typography, Spacing } from '../../src/constants/theme';
 import { Button } from '../../src/components/Button';
@@ -38,38 +38,54 @@ export default function SessionReviewScreen() {
     }
   }
 
-  function handleDelete(itemId: string) {
-    Alert.alert('Delete Item', 'Remove this item from the session?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          await deleteItem(itemId);
-          setItems((prev) => prev.filter((i) => i.id !== itemId));
-        },
-      },
-    ]);
-  }
-
-  function handleDeleteAll() {
-    Alert.alert(
-      'Delete All Items',
-      `Remove all ${items.length} items from this session?`,
-      [
+  async function handleDelete(itemId: string) {
+    if (Platform.OS === 'web') {
+      if (window.confirm('Remove this item from the session?')) {
+        await deleteItem(itemId);
+        setItems((prev) => prev.filter((i) => i.id !== itemId));
+      }
+    } else {
+      Alert.alert('Delete Item', 'Remove this item from the session?', [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete All',
+          text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            for (const item of items) {
-              await deleteItem(item.id);
-            }
-            setItems([]);
+            await deleteItem(itemId);
+            setItems((prev) => prev.filter((i) => i.id !== itemId));
           },
         },
-      ]
-    );
+      ]);
+    }
+  }
+
+  async function handleDeleteAll() {
+    if (Platform.OS === 'web') {
+      if (window.confirm(`Remove all ${items.length} items from this session?`)) {
+        for (const item of items) {
+          await deleteItem(item.id);
+        }
+        setItems([]);
+      }
+    } else {
+      Alert.alert(
+        'Delete All Items',
+        `Remove all ${items.length} items from this session?`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete All',
+            style: 'destructive',
+            onPress: async () => {
+              for (const item of items) {
+                await deleteItem(item.id);
+              }
+              setItems([]);
+            },
+          },
+        ]
+      );
+    }
   }
 
   // Calculate session totals
@@ -77,6 +93,13 @@ export default function SessionReviewScreen() {
 
   return (
     <View style={styles.container}>
+      {/* Back to home */}
+      {Platform.OS === 'web' && (
+        <TouchableOpacity onPress={() => router.replace('/')} style={styles.backButton}>
+          <Text style={styles.backText}>{'< Back to Sessions'}</Text>
+        </TouchableOpacity>
+      )}
+
       {/* Summary header */}
       <View style={styles.summary}>
         <View style={styles.summaryItem}>
@@ -104,7 +127,7 @@ export default function SessionReviewScreen() {
           <Text style={styles.emptyText}>No items in this session.</Text>
           <Button
             title="Go Back"
-            onPress={() => router.back()}
+            onPress={() => router.replace('/')}
             variant="secondary"
             style={{ marginTop: Spacing.md }}
           />
@@ -158,6 +181,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.background,
     paddingHorizontal: Spacing.md,
+  },
+  backButton: {
+    paddingVertical: Spacing.sm,
+  },
+  backText: {
+    color: Colors.primaryLight,
+    fontSize: 14,
+    fontWeight: '600',
   },
   summary: {
     flexDirection: 'row',

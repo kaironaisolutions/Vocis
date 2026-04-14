@@ -19,7 +19,22 @@
       "Bash(lsof -ti:8081)",
       "Bash(xargs kill:*)",
       "Bash(netstat -ano)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -rn \"\\\\.\\\\.\\\\/\\\\|\\\\.\\\\.\\\\\\\\\\\\\\\\\\\\\\\\|\\\\\"\\\\.\\\\.\\\\\"\\\\|new File\\\\|Paths\\\\.\" \"/m/AI Projects/Kairon Clients/Vocis/vocis-app/src\" --include=\"*.ts\")",
+      "Bash(npx eas:*)",
+      "WebFetch(domain:expo.dev)",
+      "WebFetch(domain:job-logs.eascdn.net)",
+      "Bash(npm uninstall:*)",
+      "Bash(npx eas-cli@latest build --profile preview --platform android --non-interactive --cwd \"M:/AI Projects/Kairon Clients/Vocis/vocis-app\")",
+      "Bash(npx eas-cli@latest build --profile preview --platform android --non-interactive)",
+      "Bash(eas build:*)",
+      "Bash(eas build:view d826a8fc-4380-46a0-95f5-5023196dfb5b --json)",
+      "Bash(rm:*)",
+      "Bash(cp src/db/database.ts src/db/database.native.ts)",
+      "Bash(cp src/db/webDatabase.ts src/db/database.web.ts)",
+      "Bash(node -e ':*)",
+      "Bash(npx ts-node --skip-project -e ':*)"
     ]
   },
   "enabledPlugins": {

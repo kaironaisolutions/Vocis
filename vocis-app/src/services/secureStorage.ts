@@ -67,22 +67,22 @@ export const SecureStorage = {
 };
 
 /**
- * Generate a cryptographically suitable random key.
- * Uses Math.random as a fallback — in production builds,
- * expo-crypto should be used for true CSPRNG.
+ * Generate a cryptographically secure random key.
+ * Requires crypto.getRandomValues — throws if unavailable.
+ * Never falls back to Math.random which is not cryptographically secure.
  */
 function generateRandomKey(length: number): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   const values = new Uint8Array(length);
 
-  // Use crypto.getRandomValues if available (modern RN environments)
-  if (typeof globalThis.crypto?.getRandomValues === 'function') {
-    globalThis.crypto.getRandomValues(values);
-  } else {
-    for (let i = 0; i < length; i++) {
-      values[i] = Math.floor(Math.random() * 256);
-    }
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+    throw new Error(
+      'crypto.getRandomValues is not available. Cannot generate secure encryption key. ' +
+      'This should not happen in a React Native environment.'
+    );
   }
+
+  globalThis.crypto.getRandomValues(values);
 
   let result = '';
   for (let i = 0; i < length; i++) {

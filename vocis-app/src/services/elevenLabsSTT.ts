@@ -1,4 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SecureStorage } from './secureStorage';
+import { STTProxy } from './sttProxy';
 
 const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/stream';
 
@@ -26,25 +28,97 @@ export interface STTServiceCallbacks {
   onError: (error: string) => void;
 }
 
+const RATE_LIMIT_STORAGE_KEY = 'vocis_rate_limit_state';
+const DAILY_USAGE_KEY = 'vocis_daily_api_usage';
+
 /**
- * Rate limiter to prevent API quota exhaustion.
- * Tracks sessions per hour and enforces cooldowns.
+ * Persistent rate limiter to prevent API quota exhaustion.
+ * State is stored in AsyncStorage so app restarts cannot bypass limits.
  */
 class RateLimiter {
   // Max 30 minutes per session
   static readonly MAX_SESSION_DURATION_MS = 30 * 60 * 1000;
-  // 2-second cooldown between sessions
-  static readonly SESSION_COOLDOWN_MS = 2000;
+  // 5-second cooldown between sessions
+  static readonly SESSION_COOLDOWN_MS = 5000;
   // Max 20 sessions per hour
   static readonly MAX_SESSIONS_PER_HOUR = 20;
+  // Max 120 sessions per day (hard daily cap)
+  static readonly MAX_SESSIONS_PER_DAY = 120;
   // Max 1 concurrent connection
   static readonly MAX_CONCURRENT = 1;
 
-  private static lastSessionEnd = 0;
-  private static sessionTimestamps: number[] = [];
   private static activeConnections = 0;
+  private static initialized = false;
+  private static sessionTimestamps: number[] = [];
+  private static lastSessionEnd = 0;
+  private static dailyCount = 0;
+  private static dailyDate = '';
 
-  static canStartSession(): { allowed: boolean; reason?: string } {
+  /**
+   * Load persisted rate limit state from AsyncStorage.
+   * Must be called before canStartSession.
+   */
+  static async initialize(): Promise<void> {
+    if (this.initialized) return;
+    try {
+      const stored = await AsyncStorage.getItem(RATE_LIMIT_STORAGE_KEY);
+      if (stored) {
+        const state = JSON.parse(stored);
+        this.sessionTimestamps = (state.sessionTimestamps || []).filter(
+          (t: number) => t > Date.now() - 60 * 60 * 1000
+        );
+        this.lastSessionEnd = state.lastSessionEnd || 0;
+      }
+
+      // Load daily usage
+      const today = new Date().toISOString().split('T')[0];
+      const dailyData = await AsyncStorage.getItem(DAILY_USAGE_KEY);
+      if (dailyData) {
+        const parsed = JSON.parse(dailyData);
+        if (parsed.date === today) {
+          this.dailyCount = parsed.count || 0;
+          this.dailyDate = today;
+        } else {
+          // New day, reset counter
+          this.dailyCount = 0;
+          this.dailyDate = today;
+        }
+      } else {
+        this.dailyDate = today;
+      }
+    } catch {
+      // If storage fails, start with clean state but enforce in-memory limits
+    }
+    this.initialized = true;
+  }
+
+  /**
+   * Persist current state to AsyncStorage.
+   */
+  private static async persist(): Promise<void> {
+    try {
+      await AsyncStorage.setItem(
+        RATE_LIMIT_STORAGE_KEY,
+        JSON.stringify({
+          sessionTimestamps: this.sessionTimestamps,
+          lastSessionEnd: this.lastSessionEnd,
+        })
+      );
+      await AsyncStorage.setItem(
+        DAILY_USAGE_KEY,
+        JSON.stringify({
+          date: this.dailyDate,
+          count: this.dailyCount,
+        })
+      );
+    } catch {
+      // Best-effort persistence
+    }
+  }
+
+  static async canStartSession(): Promise<{ allowed: boolean; reason?: string }> {
+    await this.initialize();
+
     // Check concurrent connections
     if (this.activeConnections >= this.MAX_CONCURRENT) {
       return { allowed: false, reason: 'A recording session is already active.' };
@@ -53,7 +127,7 @@ class RateLimiter {
     // Check cooldown
     const timeSinceLastSession = Date.now() - this.lastSessionEnd;
     if (timeSinceLastSession < this.SESSION_COOLDOWN_MS) {
-      return { allowed: false, reason: 'Please wait before starting a new session.' };
+      return { allowed: false, reason: 'Please wait a few seconds before starting a new session.' };
     }
 
     // Check hourly limit
@@ -66,17 +140,34 @@ class RateLimiter {
       };
     }
 
+    // Check daily limit
+    const today = new Date().toISOString().split('T')[0];
+    if (this.dailyDate !== today) {
+      this.dailyCount = 0;
+      this.dailyDate = today;
+    }
+    if (this.dailyCount >= this.MAX_SESSIONS_PER_DAY) {
+      return {
+        allowed: false,
+        reason: `Daily session limit (${this.MAX_SESSIONS_PER_DAY}) reached. Try again tomorrow.`,
+      };
+    }
+
     return { allowed: true };
   }
 
-  static onSessionStart() {
+  static async onSessionStart(): Promise<void> {
+    await this.initialize();
     this.activeConnections++;
     this.sessionTimestamps.push(Date.now());
+    this.dailyCount++;
+    await this.persist();
   }
 
-  static onSessionEnd() {
+  static async onSessionEnd(): Promise<void> {
     this.activeConnections = Math.max(0, this.activeConnections - 1);
     this.lastSessionEnd = Date.now();
+    await this.persist();
   }
 }
 
@@ -107,49 +198,47 @@ export class ElevenLabsSTTService {
   }
 
   async connect(): Promise<void> {
-    // Rate limit check
-    const rateCheck = RateLimiter.canStartSession();
+    // Rate limit check (persistent — survives app restarts)
+    const rateCheck = await RateLimiter.canStartSession();
     if (!rateCheck.allowed) {
       this.callbacks.onError(rateCheck.reason!);
-      return;
-    }
-
-    const apiKey = await SecureStorage.getApiKey();
-    if (!apiKey) {
-      this.callbacks.onError(
-        'No API key configured. Go to Settings to add your ElevenLabs API key.'
-      );
-      return;
-    }
-
-    // Enforce TLS — reject non-WSS connections
-    if (!ELEVENLABS_STT_WS_URL.startsWith('wss://')) {
-      this.callbacks.onError('Security error: only encrypted (WSS) connections are allowed.');
       return;
     }
 
     this.setState('connecting');
 
     try {
-      // Construct WebSocket URL with API key as query parameter.
-      // The key is read from Keychain/Keystore and never logged.
-      const wsUrl = `${ELEVENLABS_STT_WS_URL}?api_key=${apiKey}`;
+      let wsUrl: string;
+
+      if (STTProxy.isEnabled()) {
+        // PREFERRED: Use backend proxy — API key stays server-side
+        const sessionToken = await STTProxy.requestToken();
+        wsUrl = STTProxy.getWebSocketUrl(sessionToken.token);
+      } else {
+        // FALLBACK: Direct connection — API key from device Keychain/Keystore
+        const directUrl = await STTProxy.getDirectWebSocketUrl();
+        if (!directUrl) {
+          this.callbacks.onError(
+            'No API key configured. Go to Settings to add your ElevenLabs API key.'
+          );
+          this.setState('disconnected');
+          return;
+        }
+        wsUrl = directUrl;
+      }
+
+      // Enforce TLS — reject non-encrypted connections
+      if (!wsUrl.startsWith('wss://')) {
+        this.callbacks.onError('Security error: only encrypted (WSS) connections are allowed.');
+        this.setState('disconnected');
+        return;
+      }
+
       this.ws = new WebSocket(wsUrl);
 
-      // NOTE: Certificate pinning enforcement.
-      // React Native's WebSocket does not natively support cert pinning.
-      // For production, implement pinning via one of:
-      // 1. react-native-ssl-pinning (preferred)
-      // 2. Custom native module with TrustKit (iOS) / OkHttp CertificatePinner (Android)
-      // 3. Backend token dispenser proxy (recommended by design doc)
-      //
-      // The ELEVENLABS_CERT_PINS constant above documents the expected pins.
-      // Until native pinning is wired, the TLS system trust store provides
-      // baseline protection against MITM on non-compromised devices.
-
-      this.ws.onopen = () => {
+      this.ws.onopen = async () => {
         this.setState('connected');
-        RateLimiter.onSessionStart();
+        await RateLimiter.onSessionStart();
 
         // Send initial configuration
         this.ws?.send(
@@ -188,8 +277,8 @@ export class ElevenLabsSTTService {
         );
       };
 
-      this.ws.onclose = (event) => {
-        this.cleanup();
+      this.ws.onclose = async (event) => {
+        await this.cleanup();
         if (event.code !== 1000) {
           this.callbacks.onError(
             `Connection closed unexpectedly (code: ${event.code}).`
@@ -245,21 +334,21 @@ export class ElevenLabsSTTService {
     this.ws.send(JSON.stringify({ type: 'flush' }));
   }
 
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     if (this.ws) {
       this.ws.close(1000, 'Session ended by user');
     }
-    this.cleanup();
+    await this.cleanup();
     this.setState('disconnected');
   }
 
-  private cleanup() {
+  private async cleanup() {
     if (this.sessionTimeout) {
       clearTimeout(this.sessionTimeout);
       this.sessionTimeout = null;
     }
     this.ws = null;
-    RateLimiter.onSessionEnd();
+    await RateLimiter.onSessionEnd();
   }
 
   getState(): ConnectionState {

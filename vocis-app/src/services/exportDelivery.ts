@@ -23,6 +23,11 @@ export async function deliverCSV(
   const filename = getExportFilename(format);
   const tempFile = new File(Paths.cache, filename);
 
+  // Validate filename to prevent path traversal
+  if (/[\/\\]|\.\./.test(filename) || filename.length > 255) {
+    return { success: false, message: 'Invalid export filename.' };
+  }
+
   try {
     // Write CSV to temp file
     tempFile.write(csvContent);

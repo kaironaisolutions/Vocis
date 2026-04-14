@@ -1,0 +1,15 @@
+name = "vocis-stt-proxy"
+# Deploys to: https://vocis-stt-proxy.kaironai.workers.dev
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[vars]
+# Max sessions per device per hour
+RATE_LIMIT_HOURLY = "20"
+# Max sessions per device per day
+RATE_LIMIT_DAILY = "120"
+# Session token expiry in seconds (5 minutes)
+TOKEN_TTL_SECONDS = "300"
+
+# Set via `wrangler secret put ELEVENLABS_API_KEY`
+# NEVER put the actual key here — use secrets only

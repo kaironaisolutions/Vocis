@@ -140,3 +140,50 @@ describe('getExportFilename', () => {
     expect(getExportFilename('custom')).toMatch(/\.csv$/);
   });
 });
+
+describe('CSV injection prevention', () => {
+  const maliciousItems: InventoryItem[] = [
+    {
+      id: 'item-evil',
+      size: 'M',
+      decade: "90's",
+      item_name: '=CMD|"/C calc"!A1',
+      price: 50.0,
+      raw_title: "(M) 90's =CMD|\"/C calc\"!A1",
+      session_id: 'session-1',
+      logged_at: '2026-04-13T14:32:00Z',
+    },
+    {
+      id: 'item-evil2',
+      size: 'L',
+      decade: "80's",
+      item_name: '+SUM(A1:A10)',
+      price: 75.0,
+      raw_title: "(L) 80's +SUM(A1:A10)",
+      session_id: 'session-1',
+      logged_at: '2026-04-13T14:33:00Z',
+    },
+  ];
+
+  it('sanitizes formula-like values in custom format', () => {
+    const csv = generateCSV(maliciousItems, 'custom');
+    // The =CMD in raw_title after space should be sanitized
+    expect(csv).toContain("'=CMD");
+    // +SUM at start of raw_title content should be sanitized
+    expect(csv).toContain("'+SUM");
+  });
+
+  it('sanitizes formula-like values in shopify format', () => {
+    const csv = generateCSV(maliciousItems, 'shopify');
+    expect(csv).toContain("'=CMD");
+    expect(csv).toContain("'+SUM");
+  });
+
+  it('sanitizes formula-like values in ebay format', () => {
+    const csv = generateCSV(maliciousItems, 'ebay');
+    // eBay title is "90's =CMD..." — =CMD after space gets sanitized
+    expect(csv).toContain("'=CMD");
+    // "+SUM" at start of item_name
+    expect(csv).toContain("'+SUM");
+  });
+});

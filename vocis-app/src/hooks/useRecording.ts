@@ -5,32 +5,46 @@ import {
   ConnectionState,
   TranscriptEvent,
 } from '../services/elevenLabsSTT';
-import { parseTranscription, ParsedItem } from '../services/voiceParser';
+import {
+  parseTranscription,
+  splitMultipleItems,
+  ParsedItem,
+} from '../services/voiceParser';
 
 export interface UseRecordingResult {
   isRecording: boolean;
   connectionState: ConnectionState;
   partialTranscript: string;
-  currentItem: ParsedItem | null;
+  /** The current pending item (shown as preview, not yet confirmed) */
+  pendingItem: ParsedItem | null;
+  /** Items auto-confirmed from continuous speech — consume these in the UI */
+  confirmedItems: ParsedItem[];
   error: string | null;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<void>;
-  clearCurrentItem: () => void;
+  clearPendingItem: () => void;
+  consumeConfirmedItems: () => void;
   clearError: () => void;
 }
 
 /**
- * Hook that manages the full recording pipeline:
- * Microphone → Audio chunks → WebSocket → Transcript → Parser → ParsedItem
+ * Hook that manages the full native recording pipeline:
+ * Microphone → Audio chunks → WebSocket → Transcript → Parser
  *
- * No audio is ever written to device storage. Audio is streamed directly
- * to the ElevenLabs endpoint via WebSocket.
+ * Supports continuous rapid-fire mode:
+ * - Partial transcripts update live for visual feedback
+ * - Final transcripts are split into multiple items if detected
+ * - Complete items (with price) are auto-confirmed
+ * - Incomplete items become pending for manual review
+ *
+ * No audio is ever written to device storage.
  */
 export function useRecording(): UseRecordingResult {
   const [isRecording, setIsRecording] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [partialTranscript, setPartialTranscript] = useState('');
-  const [currentItem, setCurrentItem] = useState<ParsedItem | null>(null);
+  const [pendingItem, setPendingItem] = useState<ParsedItem | null>(null);
+  const [confirmedItems, setConfirmedItems] = useState<ParsedItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const sttService = useRef<ElevenLabsSTTService | null>(null);
@@ -47,10 +61,42 @@ export function useRecording(): UseRecordingResult {
   const handleTranscript = useCallback((event: TranscriptEvent) => {
     if (event.type === 'partial') {
       setPartialTranscript(event.text);
+
+      // Show real-time preview of what's being parsed (visual only)
+      const items = splitMultipleItems(event.text);
+      const current = items[items.length - 1];
+      if (current) {
+        const parsed = parseTranscription(current);
+        if (parsed.confidence.size || parsed.confidence.decade) {
+          setPendingItem(parsed);
+        }
+      }
     } else if (event.type === 'final') {
       setPartialTranscript('');
-      const parsed = parseTranscription(event.text);
-      setCurrentItem(parsed);
+
+      // Split transcript into individual items
+      const itemTexts = splitMultipleItems(event.text);
+      const newConfirmed: ParsedItem[] = [];
+      let lastIncomplete: ParsedItem | null = null;
+
+      for (const text of itemTexts) {
+        const parsed = parseTranscription(text);
+        if (parsed.confidence.price) {
+          // Complete item — auto-confirm
+          newConfirmed.push(parsed);
+        } else {
+          // Incomplete — hold as pending
+          lastIncomplete = parsed;
+        }
+      }
+
+      // Batch-add confirmed items
+      if (newConfirmed.length > 0) {
+        setConfirmedItems((prev) => [...prev, ...newConfirmed]);
+      }
+
+      // Set pending to the last incomplete item (or null if all complete)
+      setPendingItem(lastIncomplete);
     }
   }, []);
 
@@ -66,7 +112,8 @@ export function useRecording(): UseRecordingResult {
     try {
       setError(null);
       setPartialTranscript('');
-      setCurrentItem(null);
+      setPendingItem(null);
+      setConfirmedItems([]);
 
       // Request microphone permission
       const permission = await Audio.requestPermissionsAsync();
@@ -130,11 +177,6 @@ export function useRecording(): UseRecordingResult {
           const status = await recording.current.getStatusAsync();
           if (status.isRecording && status.uri) {
             // In a production build, we'd read the audio buffer directly.
-            // For expo-av, we use the recording's onRecordingStatusUpdate
-            // to get audio data. The actual streaming implementation
-            // depends on the native module's buffer access.
-            //
-            // For now, we signal the STT service with the recording URI.
             // The full native audio buffer streaming will be connected
             // when building with EAS (native modules have direct buffer access).
           }
@@ -149,13 +191,11 @@ export function useRecording(): UseRecordingResult {
   }, [handleTranscript, handleStateChange, handleError]);
 
   const stopRecording = useCallback(async () => {
-    // Clear streaming interval
     if (streamInterval.current) {
       clearInterval(streamInterval.current);
       streamInterval.current = null;
     }
 
-    // Stop recording
     if (recording.current) {
       try {
         await recording.current.stopAndUnloadAsync();
@@ -165,17 +205,14 @@ export function useRecording(): UseRecordingResult {
       recording.current = null;
     }
 
-    // Flush and disconnect STT
     if (sttService.current) {
       sttService.current.flush();
-      // Brief delay to allow final transcript
       setTimeout(() => {
         sttService.current?.disconnect();
         sttService.current = null;
       }, 500);
     }
 
-    // Reset audio mode
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
@@ -187,9 +224,13 @@ export function useRecording(): UseRecordingResult {
     setIsRecording(false);
   }, []);
 
-  const clearCurrentItem = useCallback(() => {
-    setCurrentItem(null);
+  const clearPendingItem = useCallback(() => {
+    setPendingItem(null);
     setPartialTranscript('');
+  }, []);
+
+  const consumeConfirmedItems = useCallback(() => {
+    setConfirmedItems([]);
   }, []);
 
   const clearError = useCallback(() => {
@@ -200,11 +241,13 @@ export function useRecording(): UseRecordingResult {
     isRecording,
     connectionState,
     partialTranscript,
-    currentItem,
+    pendingItem,
+    confirmedItems,
     error,
     startRecording,
     stopRecording,
-    clearCurrentItem,
+    clearPendingItem,
+    consumeConfirmedItems,
     clearError,
   };
 }

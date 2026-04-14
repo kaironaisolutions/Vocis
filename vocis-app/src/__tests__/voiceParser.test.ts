@@ -146,4 +146,37 @@ describe('parseTranscription', () => {
     // Should still have some item name
     expect(result.item_name.length).toBeGreaterThan(0);
   });
+
+  // Natural speech — no commas
+  it('parses natural speech: "large 90s red Champion hoodie 74.00"', () => {
+    const result = parseTranscription('large 90s red Champion hoodie 74.00');
+    expect(result.size).toBe('L');
+    expect(result.decade).toBe("90's");
+    expect(result.item_name).toBe('Red Champion Hoodie');
+    expect(result.price).toBe(74);
+  });
+
+  it('parses natural speech: "Medium nineties Polo Red Quilted Bomber seventy five dollars"', () => {
+    const result = parseTranscription('Medium nineties Polo Red Quilted Bomber seventy five dollars');
+    expect(result.size).toBe('M');
+    expect(result.decade).toBe("90's");
+    expect(result.price).toBe(75);
+    expect(result.item_name).toContain('Polo');
+  });
+
+  it('parses natural speech: "small 2000s Tommy Hilfiger flag tee 45"', () => {
+    const result = parseTranscription('small 2000s Tommy Hilfiger flag tee 45');
+    expect(result.size).toBe('S');
+    expect(result.decade).toBe("2000's");
+    expect(result.price).toBe(45);
+    expect(result.item_name).toContain('Tommy');
+  });
+
+  it('parses natural speech: "extra large eighties Nike windbreaker 120"', () => {
+    const result = parseTranscription('extra large eighties Nike windbreaker 120');
+    expect(result.size).toBe('XL');
+    expect(result.decade).toBe("80's");
+    expect(result.price).toBe(120);
+    expect(result.item_name).toContain('Nike');
+  });
 });

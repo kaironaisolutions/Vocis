@@ -8,7 +8,7 @@
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "scheme": "vocis",
-    "owner": "EXPO_OWNER_HERE",
+    "owner": "kaironai",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -35,12 +35,13 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.vocis.app",
-      "versionCode": 1,
       "permissions": [
         "RECORD_AUDIO",
         "INTERNET",
         "USE_BIOMETRIC",
-        "USE_FINGERPRINT"
+        "USE_FINGERPRINT",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
     "web": {
@@ -62,25 +63,15 @@
           "microphonePermission": "Vocis needs microphone access to record voice inventory entries."
         }
       ],
-      "expo-mail-composer",
-      [
-        "@sentry/react-native/expo",
-        {
-          "organization": "SENTRY_ORG_HERE",
-          "project": "vocis-app"
-        }
-      ]
+      "expo-mail-composer"
     ],
     "extra": {
       "eas": {
-        "projectId": "EAS_PROJECT_ID_HERE"
-      }
+        "projectId": "3482bf37-fed7-4d91-9a79-3757375937af"
+      },
+      "sttProxyUrl": "https://vocis-stt-proxy.kaironai.workers.dev",
+      "router": {}
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/EAS_PROJECT_ID_HERE"
-    }
+    "runtimeVersion": "1.0.0"
   }
 }

@@ -29,10 +29,13 @@ const MULTIPLIERS: Record<string, number> = {
   thousand: 1000,
 };
 
+// Words that indicate price follows
+const PRICE_INDICATORS = new Set(['dollars', 'dollar', 'bucks', 'buck']);
+
 /**
  * Parse a spoken price string into a numeric value.
  * Handles: "seventy five dollars", "$75", "75 dollars", "seventy-five",
- * "one hundred twenty dollars", "two fifty" (250), etc.
+ * "one hundred twenty dollars", "74.00", etc.
  */
 export function parsePrice(text: string): number | null {
   const cleaned = text.toLowerCase().replace(/dollars?|bucks?|\$/g, '').trim();
@@ -66,7 +69,6 @@ export function parsePrice(text: string): number | null {
       continue;
     }
 
-    // Try parsing as number in case of mixed: "one fifty" edge cases
     const parsed = parseFloat(word);
     if (!isNaN(parsed)) {
       current += parsed;
@@ -79,21 +81,18 @@ export function parsePrice(text: string): number | null {
 }
 
 /**
- * Extract size from a token, returning the normalized abbreviation.
+ * Extract size from a single token or short phrase.
  */
 export function parseSize(text: string): string | null {
   const lower = text.toLowerCase().trim();
 
-  // Direct lookup
   if (SIZE_MAP[lower]) return SIZE_MAP[lower];
 
-  // Try matching multi-word sizes within the text
   const multiWordSizes = ['extra small', 'x small', 'extra large', 'x large', 'xx large', 'double xl'];
   for (const phrase of multiWordSizes) {
     if (lower.includes(phrase)) return SIZE_MAP[phrase]!;
   }
 
-  // Single word match
   const singleWordSizes = ['small', 'medium', 'large', 'xs', 's', 'm', 'l', 'xl', 'xxl', '2xl'];
   for (const word of singleWordSizes) {
     if (lower === word) return SIZE_MAP[word]!;
@@ -103,20 +102,25 @@ export function parseSize(text: string): string | null {
 }
 
 /**
- * Extract decade from a token, returning the normalized form.
+ * Extract decade from a token.
  */
 export function parseDecade(text: string): string | null {
   const lower = text.toLowerCase().trim();
 
-  // Direct lookup
   if (DECADE_MAP[lower]) return DECADE_MAP[lower];
 
-  // Try matching within the text
   for (const [key, value] of Object.entries(DECADE_MAP)) {
     if (lower.includes(key)) return value;
   }
 
-  // Match patterns like "1990s", "1980's"
+  // Match patterns like "90s", "90's", "1990s"
+  const shortMatch = lower.match(/^(\d{2})s?'?s?$/);
+  if (shortMatch) {
+    const num = parseInt(shortMatch[1]);
+    if (num >= 50 && num <= 99) return `${num}'s`;
+    if (num >= 0 && num <= 20) return `${2000 + num}'s`;
+  }
+
   const yearMatch = lower.match(/(\d{4})s?'?s?/);
   if (yearMatch) {
     const year = parseInt(yearMatch[1]);
@@ -129,81 +133,180 @@ export function parseDecade(text: string): string | null {
   return null;
 }
 
+// Maximum input length to prevent DoS
+const MAX_TRANSCRIPT_LENGTH = 1000;
+
 /**
  * Parse a full spoken inventory entry into structured fields.
- * Expected pattern: SIZE → DECADE → ITEM NAME → PRICE
- * Example: "Medium, nineties, Polo Red Quilted Bomber, seventy-five dollars"
+ * Handles both comma-separated and natural speech:
+ *   "Medium, nineties, Polo Red Quilted Bomber, seventy-five dollars"
+ *   "large 90s red Champion hoodie 74"
  */
 export function parseTranscription(transcript: string): ParsedItem {
-  // Normalize input: remove extra whitespace, normalize punctuation
-  const cleaned = transcript
-    .replace(/\s+/g, ' ')
-    .replace(/,\s*/g, ', ')
-    .trim();
+  const truncated = transcript.length > MAX_TRANSCRIPT_LENGTH
+    ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH)
+    : transcript;
 
-  // Split on commas or natural pauses (periods, semicolons)
+  const cleaned = truncated.replace(/\s+/g, ' ').trim();
+
+  // Check if input has commas — if so, try segment-based parsing first
+  if (cleaned.includes(',')) {
+    const result = parseSegmented(cleaned);
+    if (result.confidence.size || result.confidence.decade || result.confidence.price) {
+      return result;
+    }
+  }
+
+  // Always try word-by-word parsing (handles natural speech)
+  return parseWordByWord(cleaned);
+}
+
+/**
+ * Parse comma-separated input: "Medium, nineties, Polo Bomber, $75"
+ */
+function parseSegmented(cleaned: string): ParsedItem {
   const segments = cleaned
     .split(/[,;.]+/)
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .slice(0, 20);
 
   let size: string | null = null;
   let decade: string | null = null;
   let price: number | null = null;
-  let itemNameParts: string[] = [];
-
-  // Track which segments have been claimed
   const claimed = new Set<number>();
 
-  // Pass 1: Find size (usually first segment)
   for (let i = 0; i < segments.length; i++) {
     const parsed = parseSize(segments[i]);
-    if (parsed) {
-      size = parsed;
-      claimed.add(i);
-      break;
-    }
+    if (parsed) { size = parsed; claimed.add(i); break; }
   }
 
-  // Pass 2: Find decade (usually second segment)
   for (let i = 0; i < segments.length; i++) {
     if (claimed.has(i)) continue;
     const parsed = parseDecade(segments[i]);
-    if (parsed) {
-      decade = parsed;
-      claimed.add(i);
-      break;
-    }
+    if (parsed) { decade = parsed; claimed.add(i); break; }
   }
 
-  // Pass 3: Find price (usually last segment)
   for (let i = segments.length - 1; i >= 0; i--) {
     if (claimed.has(i)) continue;
     const parsed = parsePrice(segments[i]);
-    if (parsed !== null) {
-      price = parsed;
-      claimed.add(i);
+    if (parsed !== null) { price = parsed; claimed.add(i); break; }
+  }
+
+  const itemNameParts: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    if (!claimed.has(i)) itemNameParts.push(segments[i]);
+  }
+
+  return buildResult(size, decade, price, itemNameParts.join(' '));
+}
+
+/**
+ * Parse natural speech word-by-word: "large 90s red Champion hoodie 74"
+ * Scans for size, decade, and price tokens, everything else is item name.
+ */
+function parseWordByWord(text: string): ParsedItem {
+  const words = text.split(/\s+/);
+  let size: string | null = null;
+  let decade: string | null = null;
+  let price: number | null = null;
+  const consumed = new Set<number>();
+
+  // --- Find size (scan from start, check multi-word first) ---
+  for (let i = 0; i < words.length; i++) {
+    // Three-word: "xx large"
+    if (i + 1 < words.length) {
+      const twoWord = `${words[i]} ${words[i + 1]}`;
+      const parsed = parseSize(twoWord);
+      if (parsed) {
+        size = parsed;
+        consumed.add(i);
+        consumed.add(i + 1);
+        break;
+      }
+    }
+    // Single word
+    const parsed = parseSize(words[i]);
+    if (parsed) {
+      size = parsed;
+      consumed.add(i);
       break;
     }
   }
 
-  // Pass 4: Everything unclaimed is the item name
-  for (let i = 0; i < segments.length; i++) {
-    if (!claimed.has(i)) {
-      itemNameParts.push(segments[i]);
+  // --- Find decade (scan all words) ---
+  for (let i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+    const parsed = parseDecade(words[i]);
+    if (parsed) {
+      decade = parsed;
+      consumed.add(i);
+      break;
     }
   }
 
-  // If we couldn't segment properly, try word-by-word parsing on the full string
-  if (size === null && decade === null && price === null) {
-    const result = parseUnstructured(cleaned);
-    size = result.size;
-    decade = result.decade;
-    price = result.price;
-    itemNameParts = result.itemNameParts;
+  // --- Find price (scan from end, try progressively longer phrases) ---
+  // Try expanding from the end: "dollars", "five dollars", "seventy five dollars", etc.
+  let bestPrice: number | null = null;
+  let bestPriceStart = -1;
+  let bestPriceEnd = -1;
+
+  for (let startIdx = words.length - 1; startIdx >= 0; startIdx--) {
+    // Skip consumed words
+    if (consumed.has(startIdx)) break;
+
+    const phrase = words.slice(startIdx, words.length).join(' ');
+    const parsed = parsePrice(phrase);
+    if (parsed !== null && parsed > (bestPrice ?? 0)) {
+      bestPrice = parsed;
+      bestPriceStart = startIdx;
+      bestPriceEnd = words.length - 1;
+    }
   }
 
-  const item_name = itemNameParts.join(' ').trim() || 'Unknown Item';
+  if (bestPrice !== null && bestPriceStart >= 0) {
+    price = bestPrice;
+    for (let j = bestPriceStart; j <= bestPriceEnd; j++) consumed.add(j);
+  }
+
+  // Fallback: scan for standalone numeric values
+  if (price === null) {
+    for (let i = words.length - 1; i >= 0; i--) {
+      if (consumed.has(i)) continue;
+      const word = words[i].replace(/[$,]/g, '');
+      const num = parseFloat(word);
+      if (!isNaN(num) && num > 0) {
+        price = num;
+        consumed.add(i);
+        if (i + 1 < words.length && PRICE_INDICATORS.has(words[i + 1].toLowerCase())) {
+          consumed.add(i + 1);
+        }
+        break;
+      }
+    }
+  }
+
+  // --- Everything remaining is the item name ---
+  const nameParts: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    if (!consumed.has(i)) {
+      nameParts.push(words[i]);
+    }
+  }
+
+  return buildResult(size, decade, price, nameParts.join(' '));
+}
+
+/**
+ * Build the final ParsedItem from extracted fields.
+ */
+function buildResult(
+  size: string | null,
+  decade: string | null,
+  price: number | null,
+  itemName: string
+): ParsedItem {
+  const name = titleCase(itemName.trim()) || 'Unknown Item';
   const sizeDisplay = size || '?';
   const decadeDisplay = decade || '?';
   const priceValue = price ?? 0;
@@ -211,92 +314,16 @@ export function parseTranscription(transcript: string): ParsedItem {
   return {
     size: sizeDisplay,
     decade: decadeDisplay,
-    item_name: titleCase(item_name),
+    item_name: name,
     price: priceValue,
-    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${titleCase(item_name)}`,
+    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${name}`,
     confidence: {
       size: size !== null,
       decade: decade !== null,
       price: price !== null,
-      item_name: itemNameParts.length > 0,
+      item_name: itemName.trim().length > 0,
     },
   };
-}
-
-/**
- * Fallback parser for unstructured speech without clear comma separation.
- * Scans word-by-word to extract fields.
- */
-function parseUnstructured(text: string): {
-  size: string | null;
-  decade: string | null;
-  price: number | null;
-  itemNameParts: string[];
-} {
-  const words = text.split(/\s+/);
-  let size: string | null = null;
-  let decade: string | null = null;
-  let price: number | null = null;
-  const consumedRanges: [number, number][] = [];
-
-  // Scan for size (check multi-word first)
-  for (let i = 0; i < words.length; i++) {
-    // Two-word sizes
-    if (i + 1 < words.length) {
-      const twoWord = `${words[i]} ${words[i + 1]}`;
-      const parsed = parseSize(twoWord);
-      if (parsed) {
-        size = parsed;
-        consumedRanges.push([i, i + 1]);
-        break;
-      }
-    }
-    // Single-word sizes
-    const parsed = parseSize(words[i]);
-    if (parsed) {
-      size = parsed;
-      consumedRanges.push([i, i]);
-      break;
-    }
-  }
-
-  // Scan for decade
-  for (let i = 0; i < words.length; i++) {
-    if (isConsumed(i, consumedRanges)) continue;
-    const parsed = parseDecade(words[i]);
-    if (parsed) {
-      decade = parsed;
-      consumedRanges.push([i, i]);
-      break;
-    }
-  }
-
-  // Scan for price from the end
-  for (let i = words.length - 1; i >= 0; i--) {
-    if (isConsumed(i, consumedRanges)) continue;
-    // Try multi-word price: "seventy five dollars"
-    const remaining = words.slice(i).join(' ');
-    const parsed = parsePrice(remaining);
-    if (parsed !== null) {
-      price = parsed;
-      consumedRanges.push([i, words.length - 1]);
-      break;
-    }
-  }
-
-  // Collect remaining words as item name
-  const itemNameParts: string[] = [];
-  for (let i = 0; i < words.length; i++) {
-    if (!isConsumed(i, consumedRanges)) {
-      itemNameParts.push(words[i]);
-    }
-  }
-
-  return { size, decade, price, itemNameParts };
-}
-
-function isConsumed(index: number, ranges: [number, number][]): boolean {
-  return ranges.some(([start, end]) => index >= start && index <= end);
 }
 
 function titleCase(str: string): string {
@@ -307,4 +334,48 @@ function titleCase(str: string): string {
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(' ');
+}
+
+/**
+ * Split a continuous transcript into multiple inventory items.
+ * Detects item boundaries by finding a price (number) followed by
+ * a size word (which starts the next item).
+ *
+ * Example: "large 90s red champion hoodie 74 medium nineties polo bomber 75"
+ *  → ["large 90s red champion hoodie 74", "medium nineties polo bomber 75"]
+ */
+export function splitMultipleItems(transcript: string): string[] {
+  const words = transcript.split(/\s+/);
+  const sizeWords = new Set([
+    'small', 'medium', 'large', 'xs', 'xl', 'xxl', '2xl',
+    'extra', // "extra large" — next word check handles this
+  ]);
+
+  const items: string[] = [];
+  let currentStart = 0;
+  let lastPriceEnd = -1;
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i].toLowerCase().replace(/[$,]/g, '');
+
+    const isNumber = !isNaN(parseFloat(word)) && parseFloat(word) > 0;
+    const isPriceWord = ['dollars', 'dollar', 'bucks'].includes(word);
+
+    if (isNumber || isPriceWord) {
+      lastPriceEnd = i;
+    }
+
+    // A size word after a price means a new item is starting
+    if (lastPriceEnd >= 0 && i > lastPriceEnd && sizeWords.has(word)) {
+      const itemText = words.slice(currentStart, i).join(' ').trim();
+      if (itemText) items.push(itemText);
+      currentStart = i;
+      lastPriceEnd = -1;
+    }
+  }
+
+  const lastItem = words.slice(currentStart).join(' ').trim();
+  if (lastItem) items.push(lastItem);
+
+  return items;
 }

@@ -1,6 +1,10 @@
+import { Platform } from 'react-native';
 import * as SQLite from 'expo-sqlite';
 import { InventoryItem, Session } from '../types';
 import { SecureStorage } from '../services/secureStorage';
+import { validateItem, sanitizeField } from '../services/validation';
+
+const isWeb = Platform.OS === 'web';
 
 let db: SQLite.SQLiteDatabase | null = null;
 let initializationFailed = false;
@@ -24,20 +28,14 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
 
   try {
-    // Retrieve device-bound encryption key from Keychain/Keystore
-    const encryptionKey = await SecureStorage.getDbEncryptionKey();
-
     db = await SQLite.openDatabaseAsync('vocis.db');
 
-    // Apply SQLCipher encryption key
-    // This PRAGMA must be the first statement after opening the database.
-    // If the database was previously unencrypted, this effectively encrypts it
-    // on first write. If already encrypted, it unlocks it.
-    await db.execAsync(`PRAGMA key = '${escapeSQLString(encryptionKey)}';`);
-
-    // Verify encryption is working by performing a read operation
-    // If the key is wrong, this will throw
-    await db.execAsync('PRAGMA cipher_version;');
+    // SQLCipher encryption — native only (not available on web)
+    if (!isWeb) {
+      const encryptionKey = await SecureStorage.getDbEncryptionKey();
+      await db.execAsync(`PRAGMA key = '${escapeSQLString(encryptionKey)}';`);
+      await db.execAsync('PRAGMA cipher_version;');
+    }
 
     // Enable WAL mode for better performance
     await db.execAsync('PRAGMA journal_mode = WAL;');
@@ -137,18 +135,33 @@ export async function purgeOldSessions(daysOld: number = 90): Promise<void> {
 // --- Items ---
 
 export async function addItem(item: Omit<InventoryItem, 'id' | 'logged_at'>): Promise<string> {
+  // Sanitize all string fields
+  const sanitized = {
+    ...item,
+    size: sanitizeField(item.size),
+    decade: sanitizeField(item.decade),
+    item_name: sanitizeField(item.item_name),
+    raw_title: sanitizeField(item.raw_title),
+  };
+
+  // Validate before writing
+  const validation = validateItem(sanitized);
+  if (!validation.valid) {
+    throw new Error(`Invalid item data: ${validation.errors.join(', ')}`);
+  }
+
   const database = await getDatabase();
   const id = generateUUID();
   await database.runAsync(
     `INSERT INTO items (id, size, decade, item_name, price, raw_title, session_id)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     id,
-    item.size,
-    item.decade,
-    item.item_name,
-    item.price,
-    item.raw_title,
-    item.session_id
+    sanitized.size,
+    sanitized.decade,
+    sanitized.item_name,
+    sanitized.price,
+    sanitized.raw_title,
+    sanitized.session_id
   );
   return id;
 }
@@ -183,14 +196,20 @@ export async function deleteItem(itemId: string): Promise<void> {
 // --- Utilities ---
 
 function generateUUID(): string {
-  // Use crypto.randomUUID if available for better randomness
   if (typeof globalThis.crypto?.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
   }
 
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  // Fallback using crypto.getRandomValues (available in React Native)
+  if (typeof globalThis.crypto?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(bytes);
+    // Set version 4 and variant bits
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  throw new Error('No cryptographic random source available for UUID generation.');
 }
