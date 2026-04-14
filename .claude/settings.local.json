@@ -5,7 +5,24 @@
       "Bash(python3 -m pip install python-docx)",
       "Bash(python -c \"import docx; print\\('ok'\\)\")",
       "Bash(python -m pip install python-docx)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(npx create-expo-app@latest vocis-app --template blank-typescript)",
+      "Bash(npx expo:*)",
+      "Bash(mkdir:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npm install:*)",
+      "Bash(node -e \"const fs = require\\('expo-file-system'\\); console.log\\(Object.keys\\(fs\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(npx jest:*)",
+      "Bash(npm audit:*)",
+      "Bash(taskkill //F //IM node.exe //FI \"WINDOWTITLE eq *expo*\")",
+      "Bash(pkill -f \"expo start\")",
+      "Bash(lsof -ti:8081)",
+      "Bash(xargs kill:*)",
+      "Bash(netstat -ano)",
+      "Bash(taskkill:*)"
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
   }
 }

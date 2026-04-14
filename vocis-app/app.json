@@ -1,0 +1,86 @@
+{
+  "expo": {
+    "name": "Vocis",
+    "slug": "vocis-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "scheme": "vocis",
+    "owner": "EXPO_OWNER_HERE",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1A1A2E"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.vocis.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Vocis needs microphone access to record voice inventory entries.",
+        "NSSpeechRecognitionUsageDescription": "Vocis uses speech recognition to transcribe inventory items.",
+        "NSFaceIDUsageDescription": "Vocis uses Face ID to protect your inventory data during export.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1A1A2E"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.vocis.app",
+      "versionCode": 1,
+      "permissions": [
+        "RECORD_AUDIO",
+        "INTERNET",
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-sqlite",
+        {
+          "enableFTS": true
+        }
+      ],
+      "expo-secure-store",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Vocis needs microphone access to record voice inventory entries."
+        }
+      ],
+      "expo-mail-composer",
+      [
+        "@sentry/react-native/expo",
+        {
+          "organization": "SENTRY_ORG_HERE",
+          "project": "vocis-app"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "EAS_PROJECT_ID_HERE"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/EAS_PROJECT_ID_HERE"
+    }
+  }
+}
