@@ -1,20 +1,39 @@
 import { Platform } from 'react-native';
 import * as SQLite from 'expo-sqlite';
+import * as SecureStore from 'expo-secure-store';
+import * as Crypto from 'expo-crypto';
 import { InventoryItem, Session } from '../types';
-import { SecureStorage } from '../services/secureStorage';
 import { validateItem, sanitizeField } from '../services/validation';
 
 const isWeb = Platform.OS === 'web';
+
+const DB_KEY_STORE = 'vocis_db_key_v1';
+
+/**
+ * Retrieve or generate the 32-byte hex encryption key for the SQLite database.
+ * Key is stored in iOS Keychain / Android Keystore — never in source code.
+ */
+async function getOrCreateDbKey(): Promise<string> {
+  let key = await SecureStore.getItemAsync(DB_KEY_STORE);
+  if (!key) {
+    const bytes = await Crypto.getRandomBytesAsync(32);
+    key = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    await SecureStore.setItemAsync(DB_KEY_STORE, key, {
+      keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
+  }
+  return key;
+}
 
 let db: SQLite.SQLiteDatabase | null = null;
 let initializationFailed = false;
 
 /**
  * Open the encrypted database.
- * SQLCipher is enabled via expo-sqlite plugin config.
- * The encryption key is derived from the device keychain/keystore,
- * ensuring data cannot be read even on jailbroken devices without
- * the original secure enclave key.
+ * expo-sqlite v16 native encryption is enabled via the encryptionKey option on iOS.
+ * The key is generated once and stored in the iOS Keychain / Android Keystore.
  *
  * CRITICAL: The app must not start if encryption cannot be initialized.
  */
@@ -28,13 +47,15 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (db) return db;
 
   try {
+    // Open the database (always plain open — SQLCipher encryption applied via PRAGMA key below)
     db = await SQLite.openDatabaseAsync('vocis.db');
 
-    // SQLCipher encryption — native only (not available on web)
+    // SQLCipher encryption — native only (not available on web).
+    // Requires expo-sqlite plugin built with useSQLCipher: true in app.json.
+    // PRAGMA key must be the first statement after opening.
     if (!isWeb) {
-      const encryptionKey = await SecureStorage.getDbEncryptionKey();
+      const encryptionKey = await getOrCreateDbKey();
       await db.execAsync(`PRAGMA key = '${escapeSQLString(encryptionKey)}';`);
-      await db.execAsync('PRAGMA cipher_version;');
     }
 
     // Enable WAL mode for better performance
@@ -75,7 +96,7 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
 }
 
 /**
- * Escape single quotes in SQL strings to prevent injection.
+ * Escape single quotes in SQL strings to prevent PRAGMA key injection.
  */
 function escapeSQLString(str: string): string {
   return str.replace(/'/g, "''");

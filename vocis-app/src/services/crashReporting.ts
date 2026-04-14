@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/react-native';
+import type { Event, ErrorEvent, Breadcrumb } from '@sentry/react-native';
 
 /**
  * Initialize Sentry crash reporting.
@@ -28,17 +29,22 @@ export function initCrashReporting() {
     // Sample rate for performance monitoring
     tracesSampleRate: 0.2,
     // Strip PII from error reports
-    beforeSend(event: Sentry.ErrorEvent) {
-      return sanitizeEvent(event) as Sentry.ErrorEvent;
+    beforeSend(event: ErrorEvent) {
+      return sanitizeEvent(event) as ErrorEvent;
     },
-    beforeBreadcrumb(breadcrumb) {
+    beforeBreadcrumb(breadcrumb: Breadcrumb) {
       // Don't log network request details (could contain API keys in URLs)
       if (breadcrumb.category === 'xhr' || breadcrumb.category === 'fetch') {
-        if (breadcrumb.data?.url) {
-          // Strip query parameters which may contain API keys
-          const url = new URL(breadcrumb.data.url);
-          url.search = '';
-          breadcrumb.data.url = url.toString();
+        if (breadcrumb.data?.url && typeof breadcrumb.data.url === 'string') {
+          try {
+            // Strip query parameters which may contain API keys
+            const url = new URL(breadcrumb.data.url as string);
+            url.search = '';
+            breadcrumb.data.url = url.toString();
+          } catch {
+            // Invalid URL — strip it entirely to be safe
+            breadcrumb.data.url = '[stripped]';
+          }
         }
       }
       return breadcrumb;
@@ -48,8 +54,9 @@ export function initCrashReporting() {
 
 /**
  * Strip any potentially sensitive data from Sentry events.
+ * In Sentry v8, event.breadcrumbs is Breadcrumb[] (array).
  */
-function sanitizeEvent(event: Sentry.Event): Sentry.Event {
+function sanitizeEvent(event: Event): Event {
   // Remove user info if present
   if (event.user) {
     delete event.user.email;
@@ -67,7 +74,8 @@ function sanitizeEvent(event: Sentry.Event): Sentry.Event {
   }
 
   // Scrub breadcrumb messages
-  if (event.breadcrumbs) {
+  // In Sentry v8, event.breadcrumbs is Breadcrumb[] directly
+  if (Array.isArray(event.breadcrumbs)) {
     for (const crumb of event.breadcrumbs) {
       if (crumb.message) {
         crumb.message = scrubSecrets(crumb.message);
