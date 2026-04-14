@@ -101,7 +101,12 @@ export default function RecordScreen() {
   // --- Show errors ---
   useEffect(() => {
     if (errorMsg) {
-      Alert.alert('Error', errorMsg, [{ text: 'OK', onPress: () => setErrorMsg(null) }]);
+      if (Platform.OS === 'web') {
+        window.alert(errorMsg);
+        setErrorMsg(null);
+      } else {
+        Alert.alert('Error', errorMsg, [{ text: 'OK', onPress: () => setErrorMsg(null) }]);
+      }
     }
   }, [errorMsg]);
 

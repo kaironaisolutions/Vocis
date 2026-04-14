@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Audio } from 'expo-av';
+import { File as ExpoFile } from 'expo-file-system';
 import {
   ElevenLabsSTTService,
   ConnectionState,
@@ -10,6 +11,56 @@ import {
   splitMultipleItems,
   ParsedItem,
 } from '../services/voiceParser';
+
+// Duration of each audio chunk sent to the WebSocket (ms)
+const CHUNK_DURATION_MS = 1000;
+// Standard WAV header size in bytes
+const WAV_HEADER_BYTES = 44;
+
+// Base64 lookup table for fast encoding
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let result = '';
+  const len = bytes.length;
+  for (let i = 0; i < len; i += 3) {
+    const a = bytes[i];
+    const b = i + 1 < len ? bytes[i + 1] : 0;
+    const c = i + 2 < len ? bytes[i + 2] : 0;
+    result += BASE64_CHARS[a >> 2];
+    result += BASE64_CHARS[((a & 3) << 4) | (b >> 4)];
+    result += i + 1 < len ? BASE64_CHARS[((b & 15) << 2) | (c >> 6)] : '=';
+    result += i + 2 < len ? BASE64_CHARS[c & 63] : '=';
+  }
+  return result;
+}
+
+const RECORDING_OPTIONS: Audio.RecordingOptions = {
+  isMeteringEnabled: false,
+  android: {
+    extension: '.wav',
+    outputFormat: Audio.AndroidOutputFormat.DEFAULT,
+    audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+  },
+  ios: {
+    extension: '.wav',
+    outputFormat: Audio.IOSOutputFormat.LINEARPCM,
+    audioQuality: Audio.IOSAudioQuality.HIGH,
+    sampleRate: 16000,
+    numberOfChannels: 1,
+    bitRate: 256000,
+    linearPCMBitDepth: 16,
+    linearPCMIsBigEndian: false,
+    linearPCMIsFloat: false,
+  },
+  web: {
+    mimeType: 'audio/webm',
+    bitsPerSecond: 128000,
+  },
+};
 
 export interface UseRecordingResult {
   isRecording: boolean;
@@ -34,10 +85,12 @@ export interface UseRecordingResult {
  * Supports continuous rapid-fire mode:
  * - Partial transcripts update live for visual feedback
  * - Final transcripts are split into multiple items if detected
- * - Complete items (with price) are auto-confirmed
+ * - Complete items (with size/decade + price) are auto-confirmed
  * - Incomplete items become pending for manual review
  *
- * No audio is ever written to device storage.
+ * Audio is streamed in 1-second WAV chunks — each chunk is recorded,
+ * its PCM payload extracted (WAV header stripped), base64-encoded,
+ * and sent to the ElevenLabs WebSocket. No audio is persisted on device.
  */
 export function useRecording(): UseRecordingResult {
   const [isRecording, setIsRecording] = useState(false);
@@ -48,13 +101,16 @@ export function useRecording(): UseRecordingResult {
   const [error, setError] = useState<string | null>(null);
 
   const sttService = useRef<ElevenLabsSTTService | null>(null);
-  const recording = useRef<Audio.Recording | null>(null);
-  const streamInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isStreamingRef = useRef(false);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      stopRecording();
+      isStreamingRef.current = false;
+      if (sttService.current) {
+        sttService.current.disconnect();
+        sttService.current = null;
+      }
     };
   }, []);
 
@@ -81,11 +137,12 @@ export function useRecording(): UseRecordingResult {
 
       for (const text of itemTexts) {
         const parsed = parseTranscription(text);
-        if (parsed.confidence.price) {
-          // Complete item — auto-confirm
+        // Auto-confirm only when we have enough fields — matches web criteria:
+        // Must have (size OR decade) AND price to be considered complete
+        if ((parsed.confidence.size || parsed.confidence.decade) && parsed.confidence.price) {
           newConfirmed.push(parsed);
         } else {
-          // Incomplete — hold as pending
+          // Incomplete — hold as pending for manual review
           lastIncomplete = parsed;
         }
       }
@@ -108,6 +165,69 @@ export function useRecording(): UseRecordingResult {
     setError(errorMsg);
   }, []);
 
+  /**
+   * Continuously records 1-second WAV chunks and streams PCM audio
+   * to the ElevenLabs WebSocket. Each chunk:
+   * 1. Creates a new expo-av Recording (starts capturing immediately)
+   * 2. Waits CHUNK_DURATION_MS
+   * 3. Stops recording, reads the WAV file
+   * 4. Strips the 44-byte WAV header to get raw PCM
+   * 5. Sends base64-encoded PCM via sttService.sendAudio()
+   * 6. Deletes the temp file
+   *
+   * The small gap (~50-100ms) between chunks while reading the file
+   * is acceptable — ElevenLabs buffers incoming audio server-side.
+   */
+  const streamAudioChunks = useCallback(async (stt: ElevenLabsSTTService) => {
+    while (isStreamingRef.current) {
+      let chunk: Audio.Recording | null = null;
+      try {
+        const result = await Audio.Recording.createAsync(RECORDING_OPTIONS);
+        chunk = result.recording;
+
+        // Record for the chunk duration
+        await new Promise<void>((resolve) => setTimeout(resolve, CHUNK_DURATION_MS));
+
+        // Stop and read the audio
+        await chunk.stopAndUnloadAsync();
+        const uri = chunk.getURI();
+        chunk = null; // Mark as unloaded
+
+        if (uri) {
+          const file = new ExpoFile(uri);
+          try {
+            // Use FileHandle to skip the WAV header and read only PCM data
+            const handle = file.open();
+            try {
+              const fileSize = handle.size ?? 0;
+              if (fileSize > WAV_HEADER_BYTES && isStreamingRef.current) {
+                // Seek past the 44-byte WAV header
+                handle.offset = WAV_HEADER_BYTES;
+                const pcmBytes = handle.readBytes(fileSize - WAV_HEADER_BYTES);
+                // Convert to base64 for WebSocket transport
+                const base64 = uint8ArrayToBase64(pcmBytes);
+                stt.sendAudio(base64);
+              }
+            } finally {
+              handle.close();
+            }
+          } finally {
+            // Always clean up the temp file
+            try { file.delete(); } catch {}
+          }
+        }
+      } catch {
+        // Recording may have been interrupted (e.g., user stopped, app backgrounded)
+        if (chunk) {
+          try { await chunk.stopAndUnloadAsync(); } catch {}
+        }
+        if (!isStreamingRef.current) break;
+        // Brief pause before retrying to avoid tight error loops
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }, []);
+
   const startRecording = useCallback(async () => {
     try {
       setError(null);
@@ -122,7 +242,7 @@ export function useRecording(): UseRecordingResult {
         return;
       }
 
-      // Configure audio mode
+      // Configure audio mode for recording
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
@@ -135,78 +255,28 @@ export function useRecording(): UseRecordingResult {
         onError: handleError,
       });
 
-      // Connect WebSocket
+      // Connect WebSocket (includes rate limit check)
       await sttService.current.connect();
 
-      // Start recording with PCM format for streaming
-      const { recording: newRecording } = await Audio.Recording.createAsync({
-        isMeteringEnabled: true,
-        android: {
-          extension: '.wav',
-          outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-          audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 256000,
-        },
-        ios: {
-          extension: '.wav',
-          outputFormat: Audio.IOSOutputFormat.LINEARPCM,
-          audioQuality: Audio.IOSAudioQuality.HIGH,
-          sampleRate: 16000,
-          numberOfChannels: 1,
-          bitRate: 256000,
-          linearPCMBitDepth: 16,
-          linearPCMIsBigEndian: false,
-          linearPCMIsFloat: false,
-        },
-        web: {
-          mimeType: 'audio/webm',
-          bitsPerSecond: 128000,
-        },
-      });
-
-      recording.current = newRecording;
+      // Start streaming audio chunks to the WebSocket
+      isStreamingRef.current = true;
       setIsRecording(true);
-
-      // Stream audio chunks every 250ms
-      streamInterval.current = setInterval(async () => {
-        if (!recording.current || !sttService.current) return;
-
-        try {
-          const status = await recording.current.getStatusAsync();
-          if (status.isRecording && status.uri) {
-            // In a production build, we'd read the audio buffer directly.
-            // The full native audio buffer streaming will be connected
-            // when building with EAS (native modules have direct buffer access).
-          }
-        } catch {
-          // Recording may have stopped between interval ticks
-        }
-      }, 250);
+      streamAudioChunks(sttService.current);
     } catch (err) {
       setError('Failed to start recording. Please try again.');
       setIsRecording(false);
+      isStreamingRef.current = false;
     }
-  }, [handleTranscript, handleStateChange, handleError]);
+  }, [handleTranscript, handleStateChange, handleError, streamAudioChunks]);
 
   const stopRecording = useCallback(async () => {
-    if (streamInterval.current) {
-      clearInterval(streamInterval.current);
-      streamInterval.current = null;
-    }
-
-    if (recording.current) {
-      try {
-        await recording.current.stopAndUnloadAsync();
-      } catch {
-        // Already stopped
-      }
-      recording.current = null;
-    }
+    // Signal the streaming loop to stop
+    isStreamingRef.current = false;
 
     if (sttService.current) {
+      // Flush any buffered audio on the server to get final transcript
       sttService.current.flush();
+      // Give the server a moment to send the final transcript before disconnecting
       setTimeout(() => {
         sttService.current?.disconnect();
         sttService.current = null;
