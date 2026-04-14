@@ -7,36 +7,36 @@
  * to ElevenLabs.
  *
  * Flow:
- * 1. App → POST /token (with device ID) → Worker returns session token
- * 2. App → WSS /stream?token=xxx → Worker validates token, opens
- *    upstream WebSocket to ElevenLabs with the real API key
+ * 1. App → POST /token (with device ID) → Worker returns HMAC-signed token
+ * 2. App → WSS /stream?token=xxx → Worker verifies HMAC, opens upstream WS
+ *    to ElevenLabs with the real API key
  * 3. Audio/transcripts are relayed bidirectionally
  * 4. Worker enforces per-device rate limits
+ *
+ * Tokens are stateless (HMAC-signed) so they work across all Worker isolates.
+ * No shared in-memory state required for token validation.
+ *
+ * Secrets required (set via `wrangler secret put`):
+ *   ELEVENLABS_API_KEY  — ElevenLabs API key
+ *   TOKEN_SECRET        — Random string for HMAC signing, e.g. openssl rand -hex 32
  *
  * Deploy:
  *   cd worker
  *   npm install
  *   wrangler secret put ELEVENLABS_API_KEY
+ *   wrangler secret put TOKEN_SECRET
  *   wrangler deploy
  */
 
 interface Env {
   ELEVENLABS_API_KEY: string;
+  TOKEN_SECRET: string;
   RATE_LIMIT_HOURLY: string;
   RATE_LIMIT_DAILY: string;
   TOKEN_TTL_SECONDS: string;
 }
 
-// In-memory token store (resets on worker restart, which is fine for short-lived tokens)
-const activeSessions = new Map<string, SessionInfo>();
-
-interface SessionInfo {
-  deviceId: string;
-  createdAt: number;
-  expiresAt: number;
-}
-
-// Per-device rate tracking (in-memory — resets on cold start, but workers are long-lived)
+// Per-device rate tracking (in-memory — per isolate, best-effort)
 const deviceUsage = new Map<string, { hourly: number[]; daily: { date: string; count: number } }>();
 
 export default {
@@ -46,7 +46,7 @@ export default {
     // CORS headers for mobile app
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Device-ID',
     };
 
@@ -63,12 +63,18 @@ export default {
       if (upgradeHeader?.toLowerCase() === 'websocket') {
         return handleWebSocket(request, env);
       }
+      return new Response('Expected WebSocket upgrade.', { status: 426 });
     }
 
     if (url.pathname === '/health') {
-      return new Response(JSON.stringify({ status: 'ok', sessions: activeSessions.size }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({
+          status: 'ok',
+          apiKeyConfigured: Boolean(env.ELEVENLABS_API_KEY),
+          tokenSecretConfigured: Boolean(env.TOKEN_SECRET),
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     return new Response('Not Found', { status: 404 });
@@ -76,8 +82,9 @@ export default {
 };
 
 /**
- * POST /token — Issue a short-lived session token.
- * Requires X-Device-ID header for per-device rate limiting.
+ * POST /token — Issue a stateless HMAC-signed session token.
+ * Token format: {deviceId}.{expiresAt}.{hmacHex}
+ * Verifiable by any Worker isolate — no shared in-memory state required.
  */
 async function handleTokenRequest(
   request: Request,
@@ -89,7 +96,7 @@ async function handleTokenRequest(
     return jsonResponse({ error: 'Missing or invalid X-Device-ID header.' }, 400, corsHeaders);
   }
 
-  // Validate device ID format (alphanumeric + hyphens only)
+  // Validate device ID format (alphanumeric + hyphens/underscores only — no dots, preserves token format)
   if (!/^[a-zA-Z0-9\-_]+$/.test(deviceId)) {
     return jsonResponse({ error: 'Invalid device ID format.' }, 400, corsHeaders);
   }
@@ -100,22 +107,20 @@ async function handleTokenRequest(
     return jsonResponse({ error: rateCheck.reason }, 429, corsHeaders);
   }
 
-  // Generate session token
-  const token = generateToken();
-  const ttl = parseInt(env.TOKEN_TTL_SECONDS || '300', 10);
-  const now = Date.now();
+  if (!env.ELEVENLABS_API_KEY) {
+    return jsonResponse(
+      { error: 'Server configuration error: API key not set. Contact support.' },
+      503,
+      corsHeaders
+    );
+  }
 
-  activeSessions.set(token, {
-    deviceId,
-    createdAt: now,
-    expiresAt: now + ttl * 1000,
-  });
+  // Generate stateless HMAC-signed token
+  const ttl = parseInt(env.TOKEN_TTL_SECONDS || '300', 10);
+  const token = await createStatelessToken(deviceId, ttl, env);
 
   // Record usage
   recordUsage(deviceId);
-
-  // Cleanup expired sessions
-  cleanupExpiredSessions();
 
   return jsonResponse(
     {
@@ -130,7 +135,8 @@ async function handleTokenRequest(
 
 /**
  * WSS /stream?token=xxx — WebSocket proxy to ElevenLabs.
- * Validates the session token, then relays audio/transcripts bidirectionally.
+ * Validates the HMAC-signed session token (stateless, works across isolates),
+ * then relays audio/transcripts bidirectionally.
  */
 async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
@@ -140,19 +146,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     return new Response('Missing token parameter.', { status: 401 });
   }
 
-  // Validate token
-  const session = activeSessions.get(token);
-  if (!session) {
+  // Validate HMAC-signed token (stateless — no shared memory needed)
+  const deviceId = await validateStatelessToken(token, env);
+  if (!deviceId) {
     return new Response('Invalid or expired token.', { status: 401 });
   }
 
-  if (Date.now() > session.expiresAt) {
-    activeSessions.delete(token);
-    return new Response('Token expired.', { status: 401 });
+  if (!env.ELEVENLABS_API_KEY) {
+    return new Response('Server configuration error: API key not set.', { status: 503 });
   }
-
-  // Consume token (one-time use)
-  activeSessions.delete(token);
 
   // Create WebSocket pair for the client
   const [client, server] = Object.values(new WebSocketPair());
@@ -160,7 +162,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // Connect upstream to ElevenLabs with the real API key
   const upstreamUrl = `wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=${env.ELEVENLABS_API_KEY}`;
 
-  // Accept the client connection
+  // Accept the client connection immediately
   server.accept();
 
   // Set up upstream connection
@@ -168,28 +170,28 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   // Track connection state
   let upstreamReady = false;
-  const pendingMessages: string[] = [];
+  const pendingMessages: (string | ArrayBuffer)[] = [];
 
   // Relay: client → upstream
   server.addEventListener('message', (event) => {
     if (upstreamReady) {
-      upstream.send(typeof event.data === 'string' ? event.data : '');
+      upstream.send(event.data);
     } else {
-      // Queue messages until upstream is ready
-      if (typeof event.data === 'string') {
-        pendingMessages.push(event.data);
-      }
+      pendingMessages.push(event.data);
     }
   });
 
   server.addEventListener('close', () => {
-    upstream.close(1000, 'Client disconnected');
+    try {
+      upstream.close(1000, 'Client disconnected');
+    } catch {
+      // Already closed
+    }
   });
 
   // Relay: upstream → client
   upstream.addEventListener('open', () => {
     upstreamReady = true;
-    // Flush queued messages
     for (const msg of pendingMessages) {
       upstream.send(msg);
     }
@@ -198,15 +200,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   upstream.addEventListener('message', (event: MessageEvent) => {
     try {
-      server.send(typeof event.data === 'string' ? event.data : '');
+      server.send(event.data);
     } catch {
       // Client may have disconnected
     }
   });
 
-  upstream.addEventListener('close', () => {
+  upstream.addEventListener('close', (event: CloseEvent) => {
     try {
-      server.close(1000, 'Upstream closed');
+      server.close(event.code || 1000, event.reason || 'Upstream closed');
     } catch {
       // Already closed
     }
@@ -214,7 +216,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   upstream.addEventListener('error', () => {
     try {
-      server.close(1011, 'Upstream error');
+      server.close(1011, 'Upstream connection error');
     } catch {
       // Already closed
     }
@@ -224,6 +226,77 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     status: 101,
     webSocket: client,
   });
+}
+
+// --- Stateless HMAC Token ---
+
+/**
+ * Create a stateless token: "{deviceId}.{expiresAt}.{hmacHex}"
+ * HMAC-SHA256 signed with TOKEN_SECRET — verifiable by any Worker isolate.
+ */
+async function createStatelessToken(deviceId: string, ttlSeconds: number, env: Env): Promise<string> {
+  const expiresAt = Date.now() + ttlSeconds * 1000;
+  const payload = `${deviceId}.${expiresAt}`;
+  const sig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
+  return `${payload}.${sig}`;
+}
+
+/**
+ * Validate a stateless token. Returns deviceId on success, null on failure.
+ */
+async function validateStatelessToken(token: string, env: Env): Promise<string | null> {
+  // Token format: {deviceId}.{expiresAt}.{hmacHex}
+  // deviceId is [a-zA-Z0-9-_]+ (no dots), so last two segments are expiresAt and sig
+  const lastDot = token.lastIndexOf('.');
+  if (lastDot === -1) return null;
+  const sig = token.slice(lastDot + 1);
+  const rest = token.slice(0, lastDot);
+
+  const prevDot = rest.lastIndexOf('.');
+  if (prevDot === -1) return null;
+  const expiresAtStr = rest.slice(prevDot + 1);
+  const deviceId = rest.slice(0, prevDot);
+
+  // Check expiry
+  const expiresAt = parseInt(expiresAtStr, 10);
+  if (isNaN(expiresAt) || Date.now() > expiresAt) return null;
+
+  // Validate deviceId format
+  if (!/^[a-zA-Z0-9\-_]{10,128}$/.test(deviceId)) return null;
+
+  // Verify HMAC
+  const payload = `${deviceId}.${expiresAtStr}`;
+  const expectedSig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
+  if (sig !== expectedSig) return null;
+
+  return deviceId;
+}
+
+async function hmacSHA256(data: string, secret: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// Stable per-process fallback for TOKEN_SECRET when not configured.
+// Not secure across isolates — set TOKEN_SECRET as a Cloudflare secret.
+let _fallbackSecret: string | null = null;
+function generateFallbackSecret(): string {
+  if (!_fallbackSecret) {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    _fallbackSecret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return _fallbackSecret;
 }
 
 // --- Rate Limiting ---
@@ -252,12 +325,10 @@ function checkRateLimit(
     usage.daily = { date: today, count: 0 };
   }
 
-  // Check hourly limit
   if (usage.hourly.length >= maxHourly) {
     return { allowed: false, reason: `Hourly limit (${maxHourly}) reached. Try again later.` };
   }
 
-  // Check daily limit
   if (usage.daily.count >= maxDaily) {
     return { allowed: false, reason: `Daily limit (${maxDaily}) reached. Try again tomorrow.` };
   }
@@ -283,30 +354,6 @@ function recordUsage(deviceId: string) {
 }
 
 // --- Utilities ---
-
-function generateToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-function cleanupExpiredSessions() {
-  const now = Date.now();
-  for (const [token, session] of activeSessions) {
-    if (now > session.expiresAt) {
-      activeSessions.delete(token);
-    }
-  }
-
-  // Also cleanup device usage older than 2 hours
-  const twoHoursAgo = now - 2 * 60 * 60 * 1000;
-  for (const [deviceId, usage] of deviceUsage) {
-    usage.hourly = usage.hourly.filter((t) => t > twoHoursAgo);
-    if (usage.hourly.length === 0 && usage.daily.count === 0) {
-      deviceUsage.delete(deviceId);
-    }
-  }
-}
 
 function jsonResponse(
   data: Record<string, unknown>,
