@@ -41,11 +41,29 @@ const deviceUsage = new Map<string, { hourly: number[]; daily: { date: string; c
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // Fail immediately if required secrets are not configured.
+    // Without TOKEN_SECRET the HMAC is meaningless (tokens are unforgeable only with it).
+    if (!env.TOKEN_SECRET) {
+      console.error('FATAL: TOKEN_SECRET secret is not configured. Run: wrangler secret put TOKEN_SECRET');
+      return new Response('Server misconfiguration.', { status: 503 });
+    }
+    if (!env.ELEVENLABS_API_KEY) {
+      console.error('FATAL: ELEVENLABS_API_KEY secret is not configured.');
+      return new Response('Server misconfiguration.', { status: 503 });
+    }
+
     const url = new URL(request.url);
 
-    // CORS headers for mobile app
+    // CORS: mobile apps (React Native) do not send an Origin header, so they are
+    // unaffected by CORS policy. The wildcard is narrowed to block web-browser abuse
+    // while keeping OPTIONS pre-flight working for any legitimate web client.
+    // Sensitive endpoints (/token, /stream) are protected by device-ID rate limiting
+    // and HMAC token validation, which are the actual security boundaries.
+    const origin = request.headers.get('Origin') ?? '';
+    const allowedOrigins = ['https://vocis-app.com', 'exp://', 'vocis://'];
+    const corsOrigin = allowedOrigins.some((o) => origin.startsWith(o)) ? origin : 'null';
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': corsOrigin,
       'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Device-ID',
     };
@@ -108,14 +126,6 @@ async function handleTokenRequest(
     return jsonResponse({ error: rateCheck.reason }, 429, corsHeaders);
   }
 
-  if (!env.ELEVENLABS_API_KEY) {
-    return jsonResponse(
-      { error: 'Server configuration error: API key not set. Contact support.' },
-      503,
-      corsHeaders
-    );
-  }
-
   // Generate stateless HMAC-signed token
   const ttl = parseInt(env.TOKEN_TTL_SECONDS || '300', 10);
   const token = await createStatelessToken(deviceId, ttl, env);
@@ -153,15 +163,11 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     return new Response('Invalid or expired token.', { status: 401 });
   }
 
-  if (!env.ELEVENLABS_API_KEY) {
-    return new Response('Server configuration error: API key not set.', { status: 503 });
-  }
-
   // Connect to ElevenLabs BEFORE accepting the client WebSocket.
   // CF Workers fetch() only accepts https:// — wss:// throws TypeError.
   // The runtime performs the HTTP→WS upgrade internally when it sees
   // Upgrade: websocket in the request headers.
-  console.log('[WS] Connecting to ElevenLabs — API key length:', env.ELEVENLABS_API_KEY?.length ?? 0);
+  console.log('[WS] Connecting to ElevenLabs...');
 
   let elevenLabsResp: Response;
   try {
@@ -184,8 +190,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   const upstream = elevenLabsResp.webSocket;
 
   if (!upstream) {
-    const body = await elevenLabsResp.text().catch(() => '');
-    console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status} — ${body}`);
+    console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status}`);
     // Accept the client pair so we can cleanly close it
     const [clientErr, serverErr] = Object.values(new WebSocketPair());
     serverErr.accept();
@@ -300,7 +305,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 async function createStatelessToken(deviceId: string, ttlSeconds: number, env: Env): Promise<string> {
   const expiresAt = Date.now() + ttlSeconds * 1000;
   const payload = `${deviceId}.${expiresAt}`;
-  const sig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
+  const sig = await hmacSHA256(payload, env.TOKEN_SECRET);
   return `${payload}.${sig}`;
 }
 
@@ -329,7 +334,7 @@ async function validateStatelessToken(token: string, env: Env): Promise<string |
 
   // Verify HMAC
   const payload = `${deviceId}.${expiresAtStr}`;
-  const expectedSig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
+  const expectedSig = await hmacSHA256(payload, env.TOKEN_SECRET);
   if (sig !== expectedSig) return null;
 
   return deviceId;
@@ -348,18 +353,6 @@ async function hmacSHA256(data: string, secret: string): Promise<string> {
   return Array.from(new Uint8Array(signature))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-}
-
-// Stable per-process fallback for TOKEN_SECRET when not configured.
-// Not secure across isolates — set TOKEN_SECRET as a Cloudflare secret.
-let _fallbackSecret: string | null = null;
-function generateFallbackSecret(): string {
-  if (!_fallbackSecret) {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    _fallbackSecret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  }
-  return _fallbackSecret;
 }
 
 // --- Rate Limiting ---

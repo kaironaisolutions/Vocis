@@ -302,7 +302,8 @@ export class ElevenLabsSTTService {
     } catch (err) {
       console.error('[STT] connect() threw:', err);
       this.setState('error');
-      this.callbacks.onError(`Failed to establish WebSocket connection: ${err}`);
+      // Do not expose internal error details to the UI — log only.
+      this.callbacks.onError('Failed to connect. Check your internet connection and try again.');
     }
   }
 

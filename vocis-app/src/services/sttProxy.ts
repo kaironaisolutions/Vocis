@@ -26,7 +26,7 @@ function getDeviceId(): string {
     (Constants as any).installationId ||
     Constants.sessionId ||
     'unknown-device';
-  console.log('[STT] Device ID:', id);
+  // Do NOT log the device ID — it is a persistent identifier.
   return id;
 }
 
@@ -115,8 +115,11 @@ export const STTProxy = {
       console.log('[STT] No local API key found');
       return null;
     }
-    const url = `wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=${apiKey}`;
-    console.log('[STT] Direct WS URL: wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=<redacted>');
+    // xi_api_key is the correct ElevenLabs query param name for WebSocket auth.
+    // The key is intentionally in the URL because React Native's WebSocket
+    // implementation does not support custom headers.
+    const url = `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${apiKey}`;
+    console.log('[STT] Direct WS URL: wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=<redacted>');
     return url;
   },
 };
