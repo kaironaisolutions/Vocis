@@ -10,11 +10,12 @@ const sessions: Map<string, { id: string; created_at: string }> = new Map();
 const items: Map<string, InventoryItem> = new Map();
 
 function generateUUID(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export async function createSession(): Promise<string> {
@@ -100,8 +101,21 @@ export async function getSessionItems(
 }
 
 export async function updateItem(item: InventoryItem): Promise<void> {
-  if (items.has(item.id)) {
-    items.set(item.id, item);
+  const sanitized: InventoryItem = {
+    ...item,
+    size: sanitizeField(item.size),
+    decade: sanitizeField(item.decade),
+    item_name: sanitizeField(item.item_name),
+    raw_title: sanitizeField(item.raw_title),
+  };
+
+  const validation = validateItem(sanitized);
+  if (!validation.valid) {
+    throw new Error(`Invalid item data: ${validation.errors.join(', ')}`);
+  }
+
+  if (items.has(sanitized.id)) {
+    items.set(sanitized.id, sanitized);
   }
 }
 

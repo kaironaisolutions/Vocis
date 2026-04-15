@@ -141,14 +141,23 @@ export async function deleteAllSessions(): Promise<void> {
 
 export async function purgeOldSessions(daysOld: number = 90): Promise<void> {
   const database = await getDatabase();
+  // Exclude sessions that have items logged in the last 24 hours
+  // to prevent purging a session that is actively being used.
   await database.runAsync(
     `DELETE FROM items WHERE session_id IN (
-      SELECT id FROM sessions WHERE created_at < datetime('now', ? || ' days')
+      SELECT s.id FROM sessions s
+      WHERE s.created_at < datetime('now', ? || ' days')
+      AND s.id NOT IN (
+        SELECT DISTINCT session_id FROM items WHERE logged_at > datetime('now', '-1 day')
+      )
     )`,
     `-${daysOld}`
   );
   await database.runAsync(
-    "DELETE FROM sessions WHERE created_at < datetime('now', ? || ' days')",
+    `DELETE FROM sessions WHERE created_at < datetime('now', ? || ' days')
+     AND id NOT IN (
+       SELECT DISTINCT session_id FROM items WHERE logged_at > datetime('now', '-1 day')
+     )`,
     `-${daysOld}`
   );
 }
@@ -196,16 +205,31 @@ export async function getSessionItems(sessionId: string): Promise<InventoryItem[
 }
 
 export async function updateItem(item: InventoryItem): Promise<void> {
+  // Sanitize all string fields (same as addItem)
+  const sanitized = {
+    ...item,
+    size: sanitizeField(item.size),
+    decade: sanitizeField(item.decade),
+    item_name: sanitizeField(item.item_name),
+    raw_title: sanitizeField(item.raw_title),
+  };
+
+  // Validate before writing
+  const validation = validateItem(sanitized);
+  if (!validation.valid) {
+    throw new Error(`Invalid item data: ${validation.errors.join(', ')}`);
+  }
+
   const database = await getDatabase();
   await database.runAsync(
     `UPDATE items SET size = ?, decade = ?, item_name = ?, price = ?, raw_title = ?
      WHERE id = ?`,
-    item.size,
-    item.decade,
-    item.item_name,
-    item.price,
-    item.raw_title,
-    item.id
+    sanitized.size,
+    sanitized.decade,
+    sanitized.item_name,
+    sanitized.price,
+    sanitized.raw_title,
+    sanitized.id
   );
 }
 
@@ -217,9 +241,13 @@ export async function deleteItem(itemId: string): Promise<void> {
 // --- Utilities ---
 
 function generateUUID(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  // Set version 4 (byte 6, high nibble = 0100)
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  // Set variant (byte 8, high bits = 10xx)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }

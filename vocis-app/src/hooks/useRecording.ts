@@ -115,45 +115,49 @@ export function useRecording(): UseRecordingResult {
   }, []);
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
-    if (event.type === 'partial') {
-      setPartialTranscript(event.text);
+    try {
+      if (event.type === 'partial') {
+        setPartialTranscript(event.text);
 
-      // Show real-time preview of what's being parsed (visual only)
-      const items = splitMultipleItems(event.text);
-      const current = items[items.length - 1];
-      if (current) {
-        const parsed = parseTranscription(current);
-        if (parsed.confidence.size || parsed.confidence.decade) {
-          setPendingItem(parsed);
+        // Show real-time preview of what's being parsed (visual only)
+        const items = splitMultipleItems(event.text);
+        const current = items[items.length - 1];
+        if (current) {
+          const parsed = parseTranscription(current);
+          if (parsed.confidence.size || parsed.confidence.decade) {
+            setPendingItem(parsed);
+          }
         }
-      }
-    } else if (event.type === 'final') {
-      setPartialTranscript('');
+      } else if (event.type === 'final') {
+        setPartialTranscript('');
 
-      // Split transcript into individual items
-      const itemTexts = splitMultipleItems(event.text);
-      const newConfirmed: ParsedItem[] = [];
-      let lastIncomplete: ParsedItem | null = null;
+        // Split transcript into individual items
+        const itemTexts = splitMultipleItems(event.text);
+        const newConfirmed: ParsedItem[] = [];
+        let lastIncomplete: ParsedItem | null = null;
 
-      for (const text of itemTexts) {
-        const parsed = parseTranscription(text);
-        // Auto-confirm only when we have enough fields — matches web criteria:
-        // Must have (size OR decade) AND price to be considered complete
-        if ((parsed.confidence.size || parsed.confidence.decade) && parsed.confidence.price) {
-          newConfirmed.push(parsed);
-        } else {
-          // Incomplete — hold as pending for manual review
-          lastIncomplete = parsed;
+        for (const text of itemTexts) {
+          const parsed = parseTranscription(text);
+          // Auto-confirm only when we have enough fields — matches web criteria:
+          // Must have (size OR decade) AND price to be considered complete
+          if ((parsed.confidence.size || parsed.confidence.decade) && parsed.confidence.price) {
+            newConfirmed.push(parsed);
+          } else {
+            // Incomplete — hold as pending for manual review
+            lastIncomplete = parsed;
+          }
         }
-      }
 
-      // Batch-add confirmed items
-      if (newConfirmed.length > 0) {
-        setConfirmedItems((prev) => [...prev, ...newConfirmed]);
-      }
+        // Batch-add confirmed items
+        if (newConfirmed.length > 0) {
+          setConfirmedItems((prev) => [...prev, ...newConfirmed]);
+        }
 
-      // Set pending to the last incomplete item (or null if all complete)
-      setPendingItem(lastIncomplete);
+        // Set pending to the last incomplete item (or null if all complete)
+        setPendingItem(lastIncomplete);
+      }
+    } catch (err) {
+      setError(`Failed to process transcript: ${(err as Error).message}`);
     }
   }, []);
 

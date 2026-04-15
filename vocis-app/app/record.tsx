@@ -306,13 +306,8 @@ export default function RecordScreen() {
       autoConfirmTimer.current = null;
     }
 
-    // Rate limit check
-    const rateCheck = checkItemRateLimit();
-    if (!rateCheck.allowed) {
-      setErrorMsg(rateCheck.reason!);
-      return;
-    }
-
+    // Sanitize and validate FIRST — atomic guard against race conditions
+    // (prevents double-trigger from auto-confirm + manual confirm)
     const sanitized = {
       ...item,
       size: sanitizeField(item.size),
@@ -323,6 +318,13 @@ export default function RecordScreen() {
     const validation = validateItem(sanitized);
     if (!validation.valid) {
       // Don't auto-confirm invalid items — keep as pending for manual edit
+      return;
+    }
+
+    // Rate limit check
+    const rateCheck = checkItemRateLimit();
+    if (!rateCheck.allowed) {
+      setErrorMsg(rateCheck.reason!);
       return;
     }
 

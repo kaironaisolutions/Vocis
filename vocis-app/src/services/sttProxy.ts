@@ -1,5 +1,5 @@
 import Constants from 'expo-constants';
-import { SecureStorage } from './secureStorage';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 /**
  * STT Proxy client — requests session tokens from the Cloudflare Worker
@@ -13,12 +13,29 @@ import { SecureStorage } from './secureStorage';
 const PROXY_BASE_URL =
   (Constants.expoConfig?.extra?.sttProxyUrl as string) || '';
 
+// Enforce HTTPS at init time
+if (PROXY_BASE_URL && !PROXY_BASE_URL.startsWith('https://')) {
+  throw new Error('STT proxy URL must use HTTPS.');
+}
+
+const DEVICE_ID_STORAGE_KEY = 'vocis_device_id';
+const TOKEN_REQUEST_TIMEOUT_MS = 10_000; // 10 seconds
+
 /**
- * Get a unique device identifier for rate limiting.
- * Uses Constants.installationId which is stable per app install.
+ * Get a stable, unique device identifier for rate limiting.
+ * Generated once on first launch and stored in AsyncStorage.
+ * Does NOT use deprecated Constants.installationId.
  */
-function getDeviceId(): string {
-  return Constants.installationId || 'unknown-device';
+async function getDeviceId(): Promise<string> {
+  let id = await AsyncStorage.getItem(DEVICE_ID_STORAGE_KEY);
+  if (id && id.length >= 10) return id;
+
+  // Generate a cryptographically random device ID
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  await AsyncStorage.setItem(DEVICE_ID_STORAGE_KEY, id);
+  return id;
 }
 
 export interface SessionToken {
@@ -30,7 +47,6 @@ export interface SessionToken {
 export const STTProxy = {
   /**
    * Check if proxy mode is configured.
-   * Falls back to direct API key mode if no proxy URL is set.
    */
   isEnabled(): boolean {
     return PROXY_BASE_URL.length > 0;
@@ -38,37 +54,55 @@ export const STTProxy = {
 
   /**
    * Request a session token from the proxy server.
-   * Token is short-lived (5 minutes) and single-use.
+   * Token is short-lived and single-use.
+   * Includes a 10-second timeout to prevent indefinite hangs.
    */
   async requestToken(): Promise<SessionToken> {
     if (!PROXY_BASE_URL) {
       throw new Error('STT proxy URL not configured.');
     }
 
-    const response = await fetch(`${PROXY_BASE_URL}/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Device-ID': getDeviceId(),
-      },
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TOKEN_REQUEST_TIMEOUT_MS);
 
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      const error = (body as Record<string, string>).error || `Server error (${response.status})`;
-      throw new Error(error);
+    try {
+      const deviceId = await getDeviceId();
+      const response = await fetch(`${PROXY_BASE_URL}/token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Device-ID': deviceId,
+        },
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        const error = (body as Record<string, string>).error || `Server error (${response.status})`;
+        throw new Error(error);
+      }
+
+      return response.json() as Promise<SessionToken>;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    return response.json() as Promise<SessionToken>;
   },
 
   /**
    * Build the WebSocket URL for streaming.
-   * Uses the proxy's /stream endpoint with the session token.
+   * Token is NOT in the URL — it's passed via Sec-WebSocket-Protocol header.
    */
-  getWebSocketUrl(token: string): string {
-    const wsBase = PROXY_BASE_URL.replace(/^http/, 'ws');
-    return `${wsBase}/stream?token=${token}`;
+  getWebSocketUrl(): string {
+    const wsBase = PROXY_BASE_URL.replace(/^https/, 'wss');
+    return `${wsBase}/stream`;
+  },
+
+  /**
+   * Get the Sec-WebSocket-Protocol value for passing the token.
+   * Format: "token.{tokenValue}"
+   */
+  getWebSocketProtocol(token: string): string {
+    return `token.${token}`;
   },
 
   /**

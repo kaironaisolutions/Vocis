@@ -48,7 +48,8 @@
       "Bash(kill %1)",
       "Bash(wait)",
       "Read(//tmp/**)",
-      "Bash(node -e \"const fs = require\\('expo-file-system'\\); console.log\\(Object.keys\\(fs\\).filter\\(k => k.includes\\('ncod'\\) || k.includes\\('ead'\\)\\)\\)\")"
+      "Bash(node -e \"const fs = require\\('expo-file-system'\\); console.log\\(Object.keys\\(fs\\).filter\\(k => k.includes\\('ncod'\\) || k.includes\\('ead'\\)\\)\\)\")",
+      "Bash(grep -n \"PRAGMA key\\\\|process\\\\.env\\\\|EXPO_PUBLIC\" src/**/*.ts worker/src/**/*.ts app.json)"
     ]
   },
   "enabledPlugins": {

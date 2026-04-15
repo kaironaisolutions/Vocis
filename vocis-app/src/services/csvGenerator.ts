@@ -8,14 +8,22 @@ import { InventoryItem, ExportFormat } from '../types';
  * Removes dangerous characters that could trigger formula evaluation.
  */
 function sanitizeCSVValue(value: string): string {
-  // Replace any formula trigger characters at the start with safe versions
   let sanitized = value;
+
+  // Strip control characters that could be interpreted by spreadsheets
+  sanitized = sanitized.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  // Prefix with apostrophe if the value starts with any formula trigger character.
+  // This covers: = (formula), + (formula), - (formula), @ (function),
+  // \t (tab injection), \r (carriage return injection)
   if (/^[=+\-@\t\r]/.test(sanitized)) {
     sanitized = `'${sanitized}`;
   }
-  // Also sanitize formula triggers that appear after parentheses/spaces
-  // e.g. "(M) 90's =CMD..." — the =CMD could be parsed by some spreadsheets
-  sanitized = sanitized.replace(/(?<=\s)[=+@](?=[A-Za-z])/g, (match) => `'${match}`);
+
+  // Also catch formula triggers after whitespace or parentheses anywhere in the value
+  // e.g. "(M) 90's =CMD(...)" — the =CMD could be parsed by some spreadsheets
+  sanitized = sanitized.replace(/([(\s])[=+@](?=[A-Za-z(])/g, (match, prefix) => `${prefix}'${match.slice(1)}`);
+
   return sanitized;
 }
 

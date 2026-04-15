@@ -220,8 +220,10 @@ export class ElevenLabsSTTService {
 
       // All connections go through the Cloudflare Worker proxy.
       // The API key stays server-side — never in client URLs.
+      // Token is passed via Sec-WebSocket-Protocol header, not in the URL.
       const sessionToken = await STTProxy.requestToken();
-      wsUrl = STTProxy.getWebSocketUrl(sessionToken.token);
+      wsUrl = STTProxy.getWebSocketUrl();
+      const wsProtocol = STTProxy.getWebSocketProtocol(sessionToken.token);
 
       // Enforce TLS — reject non-encrypted connections
       if (!wsUrl.startsWith('wss://')) {
@@ -230,7 +232,7 @@ export class ElevenLabsSTTService {
         return;
       }
 
-      this.ws = new WebSocket(wsUrl);
+      this.ws = new WebSocket(wsUrl, wsProtocol);
 
       this.ws.onopen = async () => {
         this.setState('connected');
@@ -269,7 +271,7 @@ export class ElevenLabsSTTService {
       this.ws.onerror = () => {
         this.setState('error');
         this.callbacks.onError(
-          'WebSocket connection error. Check your internet connection and API key.'
+          'Connection error. Check your internet connection and try again.'
         );
       };
 

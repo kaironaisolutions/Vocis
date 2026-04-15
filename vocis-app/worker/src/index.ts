@@ -8,10 +8,10 @@
  *
  * Flow:
  * 1. App → POST /token (with device ID) → Worker returns HMAC-signed token
- * 2. App → WSS /stream?token=xxx → Worker verifies HMAC, opens upstream WS
- *    to ElevenLabs with the real API key
+ * 2. App → WSS /stream (token via Sec-WebSocket-Protocol) → Worker verifies
+ *    HMAC, opens upstream WS to ElevenLabs with the real API key
  * 3. Audio/transcripts are relayed bidirectionally
- * 4. Worker enforces per-device rate limits
+ * 4. Worker enforces per-device rate limits + per-connection message throttling
  *
  * Tokens are stateless (HMAC-signed) so they work across all Worker isolates.
  * No shared in-memory state required for token validation.
@@ -36,26 +36,49 @@ interface Env {
   TOKEN_TTL_SECONDS: string;
 }
 
+// Allowed origins for WebSocket upgrade (native apps send no Origin header)
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/vocis\.kaironai\.com$/,
+  /^https:\/\/.*\.kaironai\.workers\.dev$/,
+  /^http:\/\/localhost(:\d+)?$/,
+];
+
 // Per-device rate tracking (in-memory — per isolate, best-effort)
 const deviceUsage = new Map<string, { hourly: number[]; daily: { date: string; count: number } }>();
+
+// Session timeout: 30 minutes
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+
+// WebSocket message rate limit: max messages per second per connection
+const WS_MAX_MESSAGES_PER_SECOND = 100;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // CORS headers for mobile app
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, X-Device-ID',
-    };
+    // /health — CORS allowed for monitoring
+    if (url.pathname === '/health') {
+      const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      };
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { headers: corsHeaders });
+      }
+      return new Response(
+        JSON.stringify({ status: 'ok' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
+    // OPTIONS preflight — no CORS for /token or /stream (mobile apps don't need it)
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 204 });
     }
 
     if (url.pathname === '/token' && request.method === 'POST') {
-      return handleTokenRequest(request, env, corsHeaders);
+      return handleTokenRequest(request, env);
     }
 
     if (url.pathname === '/stream') {
@@ -64,17 +87,6 @@ export default {
         return handleWebSocket(request, env);
       }
       return new Response('Expected WebSocket upgrade.', { status: 426 });
-    }
-
-    if (url.pathname === '/health') {
-      return new Response(
-        JSON.stringify({
-          status: 'ok',
-          apiKeyConfigured: Boolean(env.ELEVENLABS_API_KEY),
-          tokenSecretConfigured: Boolean(env.TOKEN_SECRET),
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
     }
 
     return new Response('Not Found', { status: 404 });
@@ -88,35 +100,43 @@ export default {
  */
 async function handleTokenRequest(
   request: Request,
-  env: Env,
-  corsHeaders: Record<string, string>
+  env: Env
 ): Promise<Response> {
+  // Validate Content-Type is present
+  const contentType = request.headers.get('Content-Type');
+  if (!contentType) {
+    return jsonResponse({ error: 'Content-Type header is required.' }, 400);
+  }
+
   const deviceId = request.headers.get('X-Device-ID');
   if (!deviceId || deviceId.length < 10 || deviceId.length > 128) {
-    return jsonResponse({ error: 'Missing or invalid X-Device-ID header.' }, 400, corsHeaders);
+    return jsonResponse({ error: 'Missing or invalid X-Device-ID header.' }, 400);
   }
 
   // Validate device ID format (alphanumeric + hyphens/underscores only — no dots, preserves token format)
   if (!/^[a-zA-Z0-9\-_]+$/.test(deviceId)) {
-    return jsonResponse({ error: 'Invalid device ID format.' }, 400, corsHeaders);
+    return jsonResponse({ error: 'Invalid device ID format.' }, 400);
   }
 
   // Check rate limits
   const rateCheck = checkRateLimit(deviceId, env);
   if (!rateCheck.allowed) {
-    return jsonResponse({ error: rateCheck.reason }, 429, corsHeaders);
+    return jsonResponse({ error: rateCheck.reason }, 429);
   }
 
+  // Require secrets to be configured — never use fallbacks
   if (!env.ELEVENLABS_API_KEY) {
-    return jsonResponse(
-      { error: 'Server configuration error: API key not set. Contact support.' },
-      503,
-      corsHeaders
-    );
+    return jsonResponse({ error: 'Service temporarily unavailable.' }, 503);
   }
 
-  // Generate stateless HMAC-signed token
-  const ttl = parseInt(env.TOKEN_TTL_SECONDS || '300', 10);
+  if (!env.TOKEN_SECRET) {
+    return jsonResponse({ error: 'Service temporarily unavailable.' }, 503);
+  }
+
+  // Validate TTL bounds (30–300 seconds, default 60)
+  const rawTtl = parseInt(env.TOKEN_TTL_SECONDS || '60', 10);
+  const ttl = Math.max(30, Math.min(300, isNaN(rawTtl) ? 60 : rawTtl));
+
   const token = await createStatelessToken(deviceId, ttl, env);
 
   // Record usage
@@ -128,22 +148,49 @@ async function handleTokenRequest(
       expires_in: ttl,
       websocket_url: '/stream',
     },
-    200,
-    corsHeaders
+    200
   );
 }
 
 /**
- * WSS /stream?token=xxx — WebSocket proxy to ElevenLabs.
+ * WSS /stream — WebSocket proxy to ElevenLabs.
+ * Token passed via Sec-WebSocket-Protocol header as "token.{tokenValue}".
  * Validates the HMAC-signed session token (stateless, works across isolates),
  * then relays audio/transcripts bidirectionally.
  */
 async function handleWebSocket(request: Request, env: Env): Promise<Response> {
-  const url = new URL(request.url);
-  const token = url.searchParams.get('token');
+  // Origin validation: accept if no Origin (native apps) or if Origin matches allowed patterns
+  const origin = request.headers.get('Origin');
+  if (origin) {
+    const originAllowed = ALLOWED_ORIGIN_PATTERNS.some((pattern) => pattern.test(origin));
+    if (!originAllowed) {
+      return new Response('Forbidden: origin not allowed.', { status: 403 });
+    }
+  }
+
+  // Extract token from Sec-WebSocket-Protocol header
+  // Client sends: Sec-WebSocket-Protocol: token.{tokenValue}
+  const protocolHeader = request.headers.get('Sec-WebSocket-Protocol');
+  let token: string | null = null;
+
+  if (protocolHeader) {
+    // Protocol header may contain comma-separated values
+    const protocols = protocolHeader.split(',').map((p) => p.trim());
+    for (const proto of protocols) {
+      if (proto.startsWith('token.')) {
+        token = proto.slice('token.'.length);
+        break;
+      }
+    }
+  }
 
   if (!token) {
-    return new Response('Missing token parameter.', { status: 401 });
+    return new Response('Missing token in Sec-WebSocket-Protocol header.', { status: 401 });
+  }
+
+  // Require secrets
+  if (!env.TOKEN_SECRET) {
+    return new Response('Service temporarily unavailable.', { status: 503 });
   }
 
   // Validate HMAC-signed token (stateless — no shared memory needed)
@@ -153,13 +200,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   }
 
   if (!env.ELEVENLABS_API_KEY) {
-    return new Response('Server configuration error: API key not set.', { status: 503 });
+    return new Response('Service temporarily unavailable.', { status: 503 });
   }
 
   // Create WebSocket pair for the client
   const [client, server] = Object.values(new WebSocketPair());
 
-  // Accept the client connection immediately
+  // Accept the client connection, echoing back the protocol so the handshake completes
   server.accept();
 
   // Connect upstream to ElevenLabs using fetch-based WebSocket upgrade.
@@ -178,23 +225,63 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
     const ws = upstreamResponse.webSocket;
     if (!ws) {
-      server.close(1011, 'Failed to establish upstream WebSocket connection');
-      return new Response(null, { status: 101, webSocket: client });
+      server.close(1011, 'Upstream connection failed');
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: { 'Sec-WebSocket-Protocol': `token.${token}` },
+      });
     }
 
     upstream = ws;
     upstream.accept();
   } catch {
-    server.close(1011, 'Failed to connect to speech-to-text service');
-    return new Response(null, { status: 101, webSocket: client });
+    server.close(1011, 'Upstream connection failed');
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { 'Sec-WebSocket-Protocol': `token.${token}` },
+    });
   }
 
-  // Track connection state for buffering early client messages
-  let upstreamReady = true; // Already accepted, so ready immediately
-  const pendingMessages: (string | ArrayBuffer)[] = [];
+  // --- Per-connection message rate limiting ---
+  let messageTimestamps: number[] = [];
 
-  // Relay: client → upstream
+  // --- Server-side session timeout (30 minutes) ---
+  const sessionTimer = setTimeout(() => {
+    try {
+      server.close(1000, 'Session timeout');
+    } catch { /* already closed */ }
+    try {
+      upstream.close(1000, 'Session timeout');
+    } catch { /* already closed */ }
+  }, SESSION_TIMEOUT_MS);
+
+  // Helper to clean up timeout on connection close
+  const clearSessionTimer = () => {
+    clearTimeout(sessionTimer);
+  };
+
+  // Relay: client → upstream (with rate limiting)
   server.addEventListener('message', (event) => {
+    const now = Date.now();
+
+    // Prune timestamps older than 1 second
+    messageTimestamps = messageTimestamps.filter((t) => now - t < 1000);
+    messageTimestamps.push(now);
+
+    if (messageTimestamps.length > WS_MAX_MESSAGES_PER_SECOND) {
+      // Rate limit exceeded — close with policy violation
+      clearSessionTimer();
+      try {
+        server.close(1008, 'Message rate limit exceeded');
+      } catch { /* already closed */ }
+      try {
+        upstream.close(1000, 'Client rate limited');
+      } catch { /* already closed */ }
+      return;
+    }
+
     try {
       upstream.send(event.data);
     } catch {
@@ -203,6 +290,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   });
 
   server.addEventListener('close', () => {
+    clearSessionTimer();
     try {
       upstream.close(1000, 'Client disconnected');
     } catch {
@@ -220,6 +308,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   });
 
   upstream.addEventListener('close', (event: CloseEvent) => {
+    clearSessionTimer();
     try {
       server.close(event.code || 1000, event.reason || 'Upstream closed');
     } catch {
@@ -228,6 +317,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   });
 
   upstream.addEventListener('error', () => {
+    clearSessionTimer();
     try {
       server.close(1011, 'Upstream connection error');
     } catch {
@@ -238,6 +328,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   return new Response(null, {
     status: 101,
     webSocket: client,
+    headers: { 'Sec-WebSocket-Protocol': `token.${token}` },
   });
 }
 
@@ -250,12 +341,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 async function createStatelessToken(deviceId: string, ttlSeconds: number, env: Env): Promise<string> {
   const expiresAt = Date.now() + ttlSeconds * 1000;
   const payload = `${deviceId}.${expiresAt}`;
-  const sig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
+  const sig = await hmacSHA256(payload, env.TOKEN_SECRET);
   return `${payload}.${sig}`;
 }
 
 /**
- * Validate a stateless token. Returns deviceId on success, null on failure.
+ * Validate a stateless token using constant-time HMAC comparison.
+ * Returns deviceId on success, null on failure.
  */
 async function validateStatelessToken(token: string, env: Env): Promise<string | null> {
   // Token format: {deviceId}.{expiresAt}.{hmacHex}
@@ -277,14 +369,17 @@ async function validateStatelessToken(token: string, env: Env): Promise<string |
   // Validate deviceId format
   if (!/^[a-zA-Z0-9\-_]{10,128}$/.test(deviceId)) return null;
 
-  // Verify HMAC
+  // Verify HMAC using constant-time comparison via crypto.subtle.verify
   const payload = `${deviceId}.${expiresAtStr}`;
-  const expectedSig = await hmacSHA256(payload, env.TOKEN_SECRET || generateFallbackSecret());
-  if (sig !== expectedSig) return null;
+  const isValid = await hmacVerify(payload, sig, env.TOKEN_SECRET);
+  if (!isValid) return null;
 
   return deviceId;
 }
 
+/**
+ * Sign data with HMAC-SHA256 and return hex string.
+ */
 async function hmacSHA256(data: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -300,16 +395,31 @@ async function hmacSHA256(data: string, secret: string): Promise<string> {
     .join('');
 }
 
-// Stable per-process fallback for TOKEN_SECRET when not configured.
-// Not secure across isolates — set TOKEN_SECRET as a Cloudflare secret.
-let _fallbackSecret: string | null = null;
-function generateFallbackSecret(): string {
-  if (!_fallbackSecret) {
-    const bytes = new Uint8Array(32);
-    crypto.getRandomValues(bytes);
-    _fallbackSecret = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+/**
+ * Constant-time HMAC verification using crypto.subtle.verify.
+ * Converts the provided hex signature back to bytes and uses the
+ * WebCrypto verify method which performs timing-safe comparison.
+ */
+async function hmacVerify(data: string, sigHex: string, secret: string): Promise<boolean> {
+  // Validate hex format before parsing
+  if (!/^[a-f0-9]{64}$/.test(sigHex)) return false;
+
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+
+  // Convert hex signature to bytes
+  const sigBytes = new Uint8Array(sigHex.length / 2);
+  for (let i = 0; i < sigBytes.length; i++) {
+    sigBytes[i] = parseInt(sigHex.slice(i * 2, i * 2 + 2), 16);
   }
-  return _fallbackSecret;
+
+  return crypto.subtle.verify('HMAC', key, sigBytes, encoder.encode(data));
 }
 
 // --- Rate Limiting ---
@@ -339,11 +449,11 @@ function checkRateLimit(
   }
 
   if (usage.hourly.length >= maxHourly) {
-    return { allowed: false, reason: `Hourly limit (${maxHourly}) reached. Try again later.` };
+    return { allowed: false, reason: 'Rate limit exceeded. Try again later.' };
   }
 
   if (usage.daily.count >= maxDaily) {
-    return { allowed: false, reason: `Daily limit (${maxDaily}) reached. Try again tomorrow.` };
+    return { allowed: false, reason: 'Rate limit exceeded. Try again tomorrow.' };
   }
 
   return { allowed: true };
@@ -371,7 +481,7 @@ function recordUsage(deviceId: string) {
 function jsonResponse(
   data: Record<string, unknown>,
   status: number,
-  headers: Record<string, string>
+  headers: Record<string, string> = {}
 ): Response {
   return new Response(JSON.stringify(data), {
     status,
