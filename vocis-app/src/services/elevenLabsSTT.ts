@@ -198,9 +198,12 @@ export class ElevenLabsSTTService {
   }
 
   async connect(): Promise<void> {
+    console.log('[STT] connect() called');
+
     // Rate limit check (persistent — survives app restarts)
     const rateCheck = await RateLimiter.canStartSession();
     if (!rateCheck.allowed) {
+      console.log('[STT] Rate limit blocked:', rateCheck.reason);
       this.callbacks.onError(rateCheck.reason!);
       return;
     }
@@ -212,10 +215,12 @@ export class ElevenLabsSTTService {
 
       if (STTProxy.isEnabled()) {
         // PREFERRED: Use backend proxy — API key stays server-side
+        console.log('[STT] Using proxy mode');
         const sessionToken = await STTProxy.requestToken();
         wsUrl = STTProxy.getWebSocketUrl(sessionToken.token);
       } else {
         // FALLBACK: Direct connection — API key from device Keychain/Keystore
+        console.log('[STT] Proxy not configured — falling back to direct mode');
         const directUrl = await STTProxy.getDirectWebSocketUrl();
         if (!directUrl) {
           this.callbacks.onError(
@@ -234,23 +239,27 @@ export class ElevenLabsSTTService {
         return;
       }
 
+      console.log('[STT] Opening WebSocket to:', wsUrl.replace(/[?&](token|api_key)=[^&]+/g, '$1=<redacted>'));
       this.ws = new WebSocket(wsUrl);
+      console.log('[STT] WebSocket created, readyState:', this.ws.readyState);
 
       this.ws.onopen = async () => {
+        console.log('[STT] WebSocket opened successfully');
         this.setState('connected');
         await RateLimiter.onSessionStart();
 
-        // Send initial configuration
-        this.ws?.send(
-          JSON.stringify({
-            type: 'config',
-            config: {
-              language: 'en',
-              encoding: 'pcm_16000',
-              sample_rate: 16000,
-            },
-          })
-        );
+        // Send initial configuration to the proxy (Worker transforms this into
+        // the correct ElevenLabs auth handshake before forwarding).
+        const initMsg = JSON.stringify({
+          type: 'config',
+          config: {
+            language: 'en',
+            encoding: 'pcm_16000',
+            sample_rate: 16000,
+          },
+        });
+        console.log('[STT] Sending init config:', initMsg);
+        this.ws?.send(initMsg);
 
         // Enforce max session duration
         this.sessionTimeout = setTimeout(() => {
@@ -262,6 +271,7 @@ export class ElevenLabsSTTService {
       };
 
       this.ws.onmessage = (event) => {
+        console.log('[STT] Message received:', String(event.data).slice(0, 120));
         try {
           const data = JSON.parse(event.data);
           this.handleMessage(data);
@@ -270,7 +280,8 @@ export class ElevenLabsSTTService {
         }
       };
 
-      this.ws.onerror = () => {
+      this.ws.onerror = (err) => {
+        console.error('[STT] WebSocket error event:', err);
         this.setState('error');
         this.callbacks.onError(
           'WebSocket connection error. Check your internet connection and API key.'
@@ -278,17 +289,19 @@ export class ElevenLabsSTTService {
       };
 
       this.ws.onclose = async (event) => {
+        console.log(`[STT] WebSocket closed — code: ${event.code}, reason: "${event.reason}", wasClean: ${event.wasClean}`);
         await this.cleanup();
         if (event.code !== 1000) {
           this.callbacks.onError(
-            `Connection closed unexpectedly (code: ${event.code}).`
+            `Connection closed unexpectedly (code: ${event.code}${event.reason ? ` — ${event.reason}` : ''}).`
           );
         }
         this.setState('disconnected');
       };
-    } catch {
+    } catch (err) {
+      console.error('[STT] connect() threw:', err);
       this.setState('error');
-      this.callbacks.onError('Failed to establish WebSocket connection.');
+      this.callbacks.onError(`Failed to establish WebSocket connection: ${err}`);
     }
   }
 
@@ -296,8 +309,10 @@ export class ElevenLabsSTTService {
     switch (data.type) {
       case 'transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
+          // ElevenLabs may use isFinal (camelCase) or is_final (snake_case)
+          const isFinal = Boolean(data.isFinal ?? data.is_final);
           this.callbacks.onTranscript({
-            type: data.is_final ? 'final' : 'partial',
+            type: isFinal ? 'final' : 'partial',
             text: data.text,
           });
         }
