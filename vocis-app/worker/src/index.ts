@@ -162,16 +162,20 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // fetch() with a wss:// URL. The xi-api-key header authenticates the connection.
   console.log('[WS] Connecting to ElevenLabs — API key length:', env.ELEVENLABS_API_KEY?.length ?? 0);
 
+  // API key MUST be in the query param for WebSocket connections —
+  // headers are stripped during the HTTP→WS upgrade handshake.
+  const elevenLabsUrl =
+    `wss://api.elevenlabs.io/v1/speech-to-text/stream` +
+    `?xi_api_key=${env.ELEVENLABS_API_KEY}`;
+
   let elevenLabsResp: Response;
   try {
-    elevenLabsResp = await fetch(
-      'wss://api.elevenlabs.io/v1/speech-to-text/stream',
-      {
-        headers: {
-          'xi-api-key': env.ELEVENLABS_API_KEY,
-        },
-      }
-    );
+    elevenLabsResp = await fetch(elevenLabsUrl, {
+      headers: {
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+      },
+    });
     console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
   } catch (e) {
     console.error('[WS] ElevenLabs fetch threw:', e);
@@ -198,6 +202,7 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   server.accept();
   console.log('[WS] Client WebSocket accepted');
 
+  let firstMessage = true;
   let audioChunkCount = 0;
 
   // App → ElevenLabs: transform message format
@@ -212,13 +217,25 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
       const msg = JSON.parse(event.data) as Record<string, unknown>;
 
       if (msg.type === 'config') {
-        // App sends config on open; ElevenLabs auth already handled above — suppress.
-        console.log('[WS] Config message suppressed (auth already sent)');
+        // App sends {type:'config',...} as its first message.
+        // ElevenLabs Scribe v2 expects {model:'scribe_v2'} as the first message instead.
+        if (firstMessage) {
+          firstMessage = false;
+          const initMsg = JSON.stringify({ model: 'scribe_v2' });
+          console.log('[WS] Sending ElevenLabs init:', initMsg);
+          upstream.send(initMsg);
+        }
         return;
       }
 
       if (msg.type === 'audio' && typeof msg.audio === 'string') {
         // Transform: {type:'audio', audio:'b64'} → {audio:'b64', flush:false}
+        if (firstMessage) {
+          // App skipped config — send init before first audio chunk
+          firstMessage = false;
+          upstream.send(JSON.stringify({ model: 'scribe_v2' }));
+          console.log('[WS] Sent late ElevenLabs init before first audio chunk');
+        }
         audioChunkCount++;
         if (audioChunkCount === 1) {
           console.log('[WS] First audio chunk received — streaming started');
