@@ -36,7 +36,21 @@ interface Env {
   TOKEN_TTL_SECONDS: string;
 }
 
-// Per-device rate tracking (in-memory — per isolate, best-effort)
+// Per-device rate tracking — in-memory, per Cloudflare Worker isolate.
+//
+// LIMITATION: Under high load CF may spin up multiple isolates, each with
+// independent counters. A determined user could exceed limits via isolate spread.
+//
+// For beta / TestFlight: in-memory limits are sufficient (single user, low traffic).
+//
+// Production upgrade path:
+//   Option A — Cloudflare KV (eventually consistent, ~100ms reads):
+//     const count = await env.RATE_LIMIT_KV.get(deviceId);
+//   Option B — Durable Objects (strongly consistent, single-instance state):
+//     const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(deviceId));
+//     const resp = await stub.fetch(request);
+//
+// Upgrade before public launch if user base grows beyond private beta.
 const deviceUsage = new Map<string, { hourly: number[]; daily: { date: string; count: number } }>();
 
 export default {

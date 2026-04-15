@@ -17,6 +17,7 @@ import { Button } from '../src/components/Button';
 import { ItemPreviewCard } from '../src/components/ItemPreviewCard';
 import { WaveformIndicator } from '../src/components/WaveformIndicator';
 import { useRecording } from '../src/hooks/useRecording';
+import { useSecurity } from '../src/context/SecurityContext';
 import { createSession, addItem } from '../src/db/database';
 import { InventoryItem } from '../src/types';
 import { parseTranscription, splitMultipleItems, ParsedItem } from '../src/services/voiceParser';
@@ -36,6 +37,7 @@ interface LoggedItem {
 export default function RecordScreen() {
   const router = useRouter();
   const nativeRecording = useRecording();
+  const { isCompromised } = useSecurity();
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
@@ -434,21 +436,35 @@ export default function RecordScreen() {
 
       {/* Mic button */}
       <View style={styles.micArea}>
-        <TouchableOpacity onPress={handleStartStop} activeOpacity={0.7}>
-          <Animated.View
-            style={[
-              styles.micButton,
-              recording && styles.micButtonActive,
-              { transform: [{ scale: recording ? pulseAnim : 1 }] },
-            ]}
-          >
-            <View style={[styles.micInner, recording && styles.micInnerActive]}>
-              <Text style={styles.micIcon}>{recording ? 'Stop' : 'Start'}</Text>
+        {isCompromised ? (
+          <View style={[styles.micButton, styles.micButtonDisabled]}>
+            <View style={[styles.micInner, styles.micInnerDisabled]}>
+              <Text style={[styles.micIcon, styles.micIconDisabled]}>Locked</Text>
             </View>
-          </Animated.View>
-        </TouchableOpacity>
+          </View>
+        ) : (
+          <TouchableOpacity onPress={handleStartStop} activeOpacity={0.7}>
+            <Animated.View
+              style={[
+                styles.micButton,
+                recording && styles.micButtonActive,
+                { transform: [{ scale: recording ? pulseAnim : 1 }] },
+              ]}
+            >
+              <View style={[styles.micInner, recording && styles.micInnerActive]}>
+                <Text style={styles.micIcon}>{recording ? 'Stop' : 'Start'}</Text>
+              </View>
+            </Animated.View>
+          </TouchableOpacity>
+        )}
 
-        <WaveformIndicator active={recording} />
+        {isCompromised && (
+          <Text style={styles.securityWarning}>
+            Recording is disabled on this device for security reasons.
+          </Text>
+        )}
+
+        <WaveformIndicator active={recording && !isCompromised} />
 
         {liveTranscript && !pendingItem ? (
           <View style={styles.transcriptBubble}>
@@ -631,6 +647,23 @@ const styles = StyleSheet.create({
     ...Typography.bodySmall,
     color: Colors.textMuted,
     fontSize: 11,
+  },
+  micButtonDisabled: {
+    opacity: 0.4,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
+  micInnerDisabled: {
+    backgroundColor: Colors.surfaceLight,
+  },
+  micIconDisabled: {
+    color: Colors.textMuted,
+  },
+  securityWarning: {
+    ...Typography.bodySmall,
+    color: Colors.error,
+    textAlign: 'center',
+    paddingHorizontal: Spacing.lg,
   },
   previewSection: {
     marginTop: Spacing.sm,
