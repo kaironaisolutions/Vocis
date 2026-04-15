@@ -8,6 +8,8 @@ const KEYS = {
   // Export PIN flag controls a security gate — stored in SecureStore (Keychain/Keystore),
   // not AsyncStorage, so it cannot be tampered with on a rooted/jailbroken device.
   EXPORT_PIN_ENABLED: 'vocis_export_pin_enabled',
+  // Tracks whether the user has seen the first-launch onboarding alert.
+  ONBOARDING_V1: 'vocis_onboarding_v1',
 } as const;
 
 export interface AppSettings {
@@ -19,7 +21,8 @@ export interface AppSettings {
 const DEFAULTS: AppSettings = {
   autoPurgeEnabled: true,
   autoPurgeDays: 90,
-  exportPinEnabled: false,
+  // Default ON — export lock is a security feature, users can opt out in Settings.
+  exportPinEnabled: true,
 };
 
 export const AppSettingsService = {
@@ -43,6 +46,19 @@ export const AppSettingsService = {
     if (days !== undefined) {
       await AsyncStorage.setItem(KEYS.AUTO_PURGE_DAYS, String(days));
     }
+  },
+
+  async setAutoPurgeDays(days: number): Promise<void> {
+    await AsyncStorage.setItem(KEYS.AUTO_PURGE_DAYS, String(days));
+  },
+
+  async hasSeenOnboarding(): Promise<boolean> {
+    const val = await AsyncStorage.getItem(KEYS.ONBOARDING_V1);
+    return val === 'true';
+  },
+
+  async markOnboardingSeen(): Promise<void> {
+    await AsyncStorage.setItem(KEYS.ONBOARDING_V1, 'true');
   },
 
   async setExportPin(enabled: boolean): Promise<void> {

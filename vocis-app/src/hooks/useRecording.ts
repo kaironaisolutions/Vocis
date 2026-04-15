@@ -249,6 +249,15 @@ export function useRecording(): UseRecordingResult {
         } catch (err) {
           console.error('[Recording] Failed to read audio file:', err);
           setError('Failed to process recording. Please try again.');
+        } finally {
+          // Delete the temp WAV file immediately after reading — audio must not
+          // persist on device storage beyond the recording session.
+          try {
+            await FileSystem.deleteAsync(audioUri, { idempotent: true });
+            console.log('[Recording] Temp audio file deleted');
+          } catch {
+            // Best-effort — OS will clean up temp files eventually
+          }
         }
       }
 

@@ -1,17 +1,43 @@
 import { useEffect } from 'react';
+import { Alert } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Colors } from '../src/constants/theme';
 import { useAutoPurge } from '../src/hooks/useAutoPurge';
-import { useDeviceSecurityCheck } from '../src/hooks/useDeviceSecurityCheck';
+import { DeviceSecurity } from '../src/services/deviceSecurity';
 import { initCrashReporting } from '../src/services/crashReporting';
+import { AppSettingsService } from '../src/services/appSettings';
+import { SecurityProvider, useSecurity } from '../src/context/SecurityContext';
 
-export default function RootLayout() {
+function AppLayout() {
+  const { setIsCompromised } = useSecurity();
+
   useEffect(() => {
     initCrashReporting();
+    checkSecurityAndOnboarding();
   }, []);
+
   useAutoPurge();
-  useDeviceSecurityCheck();
+
+  async function checkSecurityAndOnboarding() {
+    // Jailbreak / root detection — runs once on launch
+    const compromised = DeviceSecurity.isDeviceCompromised();
+    if (compromised) {
+      setIsCompromised(true);
+      Alert.alert('Security Warning', DeviceSecurity.getWarningMessage(), [{ text: 'I Understand' }]);
+    }
+
+    // First-launch onboarding — show biometric lock notice once
+    const seen = await AppSettingsService.hasSeenOnboarding();
+    if (!seen) {
+      await AppSettingsService.markOnboardingSeen();
+      Alert.alert(
+        'Data Protected',
+        'Your inventory is protected with biometric authentication before export. You can change this in Settings.',
+        [{ text: 'Got it' }]
+      );
+    }
+  }
 
   return (
     <>
@@ -59,5 +85,13 @@ export default function RootLayout() {
         />
       </Stack>
     </>
+  );
+}
+
+export default function RootLayout() {
+  return (
+    <SecurityProvider>
+      <AppLayout />
+    </SecurityProvider>
   );
 }

@@ -45,6 +45,25 @@ export default function SettingsScreen() {
     await AppSettingsService.setAutoPurge(value, settings.autoPurgeDays);
   }
 
+  function handleChangePurgeDays() {
+    const PURGE_OPTIONS = [30, 60, 90, 180, 365];
+    Alert.alert(
+      'Auto-Delete Sessions After',
+      'Choose how long to keep session history',
+      [
+        ...PURGE_OPTIONS.map((days) => ({
+          text: `${days} days${days === settings.autoPurgeDays ? ' (current)' : ''}`,
+          onPress: async () => {
+            const updated = { ...settings, autoPurgeDays: days };
+            setSettings(updated);
+            await AppSettingsService.setAutoPurgeDays(days);
+          },
+        })),
+        { text: 'Cancel', style: 'cancel' as const },
+      ]
+    );
+  }
+
   async function handleSaveApiKey() {
     const trimmed = apiKeyInput.trim();
     if (!trimmed) {
@@ -187,9 +206,11 @@ export default function SettingsScreen() {
         <View style={styles.row}>
           <View style={styles.rowText}>
             <Text style={styles.label}>Auto-purge old sessions</Text>
-            <Text style={styles.sublabel}>
-              Delete sessions older than {settings.autoPurgeDays} days
-            </Text>
+            <TouchableOpacity onPress={handleChangePurgeDays} disabled={!settings.autoPurgeEnabled}>
+              <Text style={[styles.sublabel, settings.autoPurgeEnabled && styles.sublabelTappable]}>
+                Delete after {settings.autoPurgeDays} days · Tap to change
+              </Text>
+            </TouchableOpacity>
           </View>
           <Switch
             value={settings.autoPurgeEnabled}
@@ -313,6 +334,10 @@ const styles = StyleSheet.create({
   sublabel: {
     ...Typography.bodySmall,
     marginTop: 2,
+  },
+  sublabelTappable: {
+    color: Colors.accent,
+    textDecorationLine: 'underline',
   },
   keyActions: {
     flexDirection: 'row',

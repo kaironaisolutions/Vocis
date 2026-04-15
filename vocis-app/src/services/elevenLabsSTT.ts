@@ -4,16 +4,23 @@ import { STTProxy } from './sttProxy';
 
 const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
-// Certificate pinning: SHA-256 pins for ElevenLabs API endpoint.
-// These should be updated when ElevenLabs rotates their certificates.
-// In a native build, actual pinning is enforced via react-native-ssl-pinning
-// or a custom native module. This constant documents the expected pins.
-const ELEVENLABS_CERT_PINS = [
-  // Primary pin (current certificate)
-  // Secondary pin (backup certificate)
-  // These values must be obtained from ElevenLabs and updated periodically.
-  // Placeholder — replace with actual SHA-256 SPKI hashes before production.
-] as const;
+// CERT PINNING — TODO before production
+// Cannot be implemented in Expo Go. Requires a dev build with a custom native module.
+// See: https://docs.expo.dev/guides/security/
+//
+// For production implementation:
+//   1. Get ElevenLabs SPKI hash:
+//      openssl s_client -connect api.elevenlabs.io:443 </dev/null | \
+//        openssl x509 -pubkey -noout | \
+//        openssl pkey -pubin -outform DER | \
+//        openssl dgst -sha256 -binary | base64
+//   2. Add hashes to ELEVENLABS_CERT_PINS below
+//   3. Implement pinning check in connect() using react-native-ssl-pinning
+//
+// Current status: STUB — no pinning enforced.
+// Risk level: LOW — all traffic goes through Cloudflare Worker proxy (TLS terminated
+// at CF edge), so the direct ElevenLabs connection is server-to-server.
+const ELEVENLABS_CERT_PINS: string[] = []; // TODO: populate before production
 
 export type TranscriptEvent = {
   type: 'partial' | 'final';
