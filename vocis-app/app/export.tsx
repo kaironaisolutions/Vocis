@@ -50,7 +50,11 @@ export default function ExportScreen() {
   const [exporting, setExporting] = useState<DeliveryMethod | null>(null);
 
   useEffect(() => {
-    if (sessionId) loadItems();
+    if (!sessionId) {
+      router.replace('/');
+      return;
+    }
+    loadItems();
   }, [sessionId]);
 
   async function loadItems() {
@@ -78,6 +82,13 @@ export default function ExportScreen() {
     if (method !== 'download') {
       const proceed = await ExportSecurity.warnUnencryptedChannel(method);
       if (!proceed) return;
+    }
+
+    // Runtime format whitelist — defense in depth beyond TypeScript enum
+    const validFormats: ExportFormat[] = ['custom', 'shopify', 'ebay'];
+    if (!validFormats.includes(selectedFormat)) {
+      Alert.alert('Error', 'Invalid export format.');
+      return;
     }
 
     setExporting(method);

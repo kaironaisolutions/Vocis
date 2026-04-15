@@ -143,9 +143,12 @@ const MAX_TRANSCRIPT_LENGTH = 1000;
  *   "large 90s red Champion hoodie 74"
  */
 export function parseTranscription(transcript: string): ParsedItem {
-  const truncated = transcript.length > MAX_TRANSCRIPT_LENGTH
-    ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH)
-    : transcript;
+  // Strip control characters before any processing to prevent UI corruption
+  const sanitized = transcript.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  const truncated = sanitized.length > MAX_TRANSCRIPT_LENGTH
+    ? sanitized.slice(0, MAX_TRANSCRIPT_LENGTH)
+    : sanitized;
 
   const cleaned = truncated.replace(/\s+/g, ' ').trim();
 

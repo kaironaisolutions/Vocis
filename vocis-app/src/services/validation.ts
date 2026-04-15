@@ -28,6 +28,8 @@ export function validateItem(fields: {
   // Size validation: must match known enum or '?'
   if (!fields.size || fields.size.trim() === '') {
     errors.push('Size is required.');
+  } else if (fields.size.length > 10) {
+    errors.push('Size is too long (max 10 characters).');
   } else if (fields.size === '?') {
     warnings.push('Size could not be detected. Please verify.');
   } else if (!VALID_SIZES.has(fields.size as never)) {
@@ -37,6 +39,8 @@ export function validateItem(fields: {
   // Decade validation
   if (!fields.decade || fields.decade.trim() === '') {
     errors.push('Decade is required.');
+  } else if (fields.decade.length > 20) {
+    errors.push('Decade is too long (max 20 characters).');
   } else if (fields.decade === '?') {
     warnings.push('Decade could not be detected. Please verify.');
   } else if (!VALID_DECADE_PATTERN.test(fields.decade)) {
@@ -54,15 +58,17 @@ export function validateItem(fields: {
     errors.push('Item name is too long (max 200 characters).');
   }
 
-  // Price validation: must be a positive number, not NaN
+  // Price validation: must be a positive number, not NaN, within reasonable range
   if (fields.price === undefined || fields.price === null || isNaN(fields.price)) {
     errors.push('Price must be a valid number.');
+  } else if (!isFinite(fields.price)) {
+    errors.push('Price must be a finite number.');
   } else if (fields.price < 0) {
     errors.push('Price cannot be negative.');
   } else if (fields.price === 0) {
     warnings.push('Price is $0.00. Please verify.');
   } else if (fields.price > 100000) {
-    warnings.push(`Price $${fields.price.toFixed(2)} seems unusually high. Please verify.`);
+    errors.push('Price exceeds maximum ($100,000).');
   }
 
   return {

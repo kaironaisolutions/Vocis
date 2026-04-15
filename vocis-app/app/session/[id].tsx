@@ -6,6 +6,7 @@ import { Button } from '../../src/components/Button';
 import { ItemPreviewCard } from '../../src/components/ItemPreviewCard';
 import { getSessionItems, deleteItem, updateItem } from '../../src/db/database';
 import { InventoryItem } from '../../src/types';
+import { validateItem, sanitizeField } from '../../src/services/validation';
 
 export default function SessionReviewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -15,7 +16,11 @@ export default function SessionReviewScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (id) loadItems();
+      if (!id) {
+        router.replace('/');
+        return;
+      }
+      loadItems();
     }, [id])
   );
 
@@ -28,10 +33,25 @@ export default function SessionReviewScreen() {
   }
 
   async function handleSave(updated: InventoryItem) {
+    // Sanitize and validate edited values before saving
+    const sanitized: InventoryItem = {
+      ...updated,
+      size: sanitizeField(updated.size),
+      decade: sanitizeField(updated.decade),
+      item_name: sanitizeField(updated.item_name),
+      raw_title: sanitizeField(updated.raw_title),
+    };
+
+    const validation = validateItem(sanitized);
+    if (!validation.valid) {
+      Alert.alert('Validation Error', validation.errors.join('\n'));
+      return;
+    }
+
     try {
-      await updateItem(updated);
+      await updateItem(sanitized);
       setItems((prev) =>
-        prev.map((item) => (item.id === updated.id ? updated : item))
+        prev.map((item) => (item.id === sanitized.id ? sanitized : item))
       );
     } catch {
       Alert.alert('Error', 'Failed to save changes.');

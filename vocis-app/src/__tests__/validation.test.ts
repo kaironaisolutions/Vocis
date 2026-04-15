@@ -77,10 +77,10 @@ describe('validateItem', () => {
     expect(result.warnings.some((w) => w.includes('$0.00'))).toBe(true);
   });
 
-  it('warns on unusually high price', () => {
+  it('rejects price exceeding maximum', () => {
     const result = validateItem({ ...validItem, price: 200000 });
-    expect(result.valid).toBe(true);
-    expect(result.warnings.some((w) => w.includes('unusually high'))).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('exceeds maximum'))).toBe(true);
   });
 });
 

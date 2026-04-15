@@ -102,7 +102,12 @@ export default function RecordScreen() {
   // --- Show errors ---
   useEffect(() => {
     if (errorMsg) {
-      Alert.alert('Error', errorMsg, [{ text: 'OK', onPress: () => setErrorMsg(null) }]);
+      if (Platform.OS === 'web') {
+        window.alert(errorMsg);
+        setErrorMsg(null);
+      } else {
+        Alert.alert('Error', errorMsg, [{ text: 'OK', onPress: () => setErrorMsg(null) }]);
+      }
     }
   }, [errorMsg]);
 
@@ -339,13 +344,8 @@ export default function RecordScreen() {
       autoConfirmTimer.current = null;
     }
 
-    // Rate limit check
-    const rateCheck = checkItemRateLimit();
-    if (!rateCheck.allowed) {
-      setErrorMsg(rateCheck.reason!);
-      return;
-    }
-
+    // Sanitize and validate FIRST — atomic guard against race conditions
+    // (prevents double-trigger from auto-confirm + manual confirm)
     const sanitized = {
       ...item,
       size: sanitizeField(item.size),
@@ -356,6 +356,13 @@ export default function RecordScreen() {
     const validation = validateItem(sanitized);
     if (!validation.valid) {
       // Don't auto-confirm invalid items — keep as pending for manual edit
+      return;
+    }
+
+    // Rate limit check
+    const rateCheck = checkItemRateLimit();
+    if (!rateCheck.allowed) {
+      setErrorMsg(rateCheck.reason!);
       return;
     }
 
