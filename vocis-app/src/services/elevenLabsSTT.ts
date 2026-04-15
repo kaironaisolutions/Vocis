@@ -239,7 +239,8 @@ export class ElevenLabsSTTService {
         return;
       }
 
-      console.log('[STT] Opening WebSocket to:', wsUrl.replace(/[?&](token|api_key)=[^&]+/g, '$1=<redacted>'));
+      // Log URL with sensitive params redacted — use a regex that preserves the ? separator.
+      console.log('[STT] Opening WebSocket to:', wsUrl.replace(/(token|api_key)=[^&]+/g, '$1=<redacted>'));
       this.ws = new WebSocket(wsUrl);
       console.log('[STT] WebSocket created, readyState:', this.ws.readyState);
 

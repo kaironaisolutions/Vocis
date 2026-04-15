@@ -95,10 +95,13 @@ export const STTProxy = {
    * Uses the proxy's /stream endpoint with the session token.
    */
   getWebSocketUrl(token: string): string {
+    // Use URL constructor to avoid any string-manipulation bugs with ? separator.
     const wsBase = getProxyBaseUrl().replace(/^http/, 'ws');
-    const url = `${wsBase}/stream?token=${token}`;
-    console.log('[STT] Proxy WS URL:', url.replace(/token=.+/, 'token=<redacted>'));
-    return url;
+    const wsUrl = new URL('/stream', wsBase);
+    wsUrl.searchParams.set('token', token);
+    const finalUrl = wsUrl.toString();
+    console.log('[STT] Proxy WS URL:', finalUrl.replace(/token=[^&]+/, 'token=<redacted>'));
+    return finalUrl;
   },
 
   /**
