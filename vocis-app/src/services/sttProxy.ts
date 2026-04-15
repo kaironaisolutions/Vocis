@@ -95,10 +95,14 @@ export const STTProxy = {
    * Uses the proxy's /stream endpoint with the session token.
    */
   getWebSocketUrl(token: string): string {
-    // Use URL constructor to avoid any string-manipulation bugs with ? separator.
     const wsBase = getProxyBaseUrl().replace(/^http/, 'ws');
     const wsUrl = new URL('/stream', wsBase);
     wsUrl.searchParams.set('token', token);
+    // Scribe v2 Realtime session config is passed as query params so the
+    // Worker can forward them to ElevenLabs when opening the upstream connection.
+    wsUrl.searchParams.set('model_id', 'scribe_v2_realtime');
+    wsUrl.searchParams.set('language_code', 'en');
+    wsUrl.searchParams.set('sample_rate', '16000');
     const finalUrl = wsUrl.toString();
     console.log('[STT] Proxy WS URL:', finalUrl.replace(/token=[^&]+/, 'token=<redacted>'));
     return finalUrl;
@@ -118,8 +122,8 @@ export const STTProxy = {
     // xi_api_key is the correct ElevenLabs query param name for WebSocket auth.
     // The key is intentionally in the URL because React Native's WebSocket
     // implementation does not support custom headers.
-    const url = `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${apiKey}`;
-    console.log('[STT] Direct WS URL: wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=<redacted>');
+    const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?xi_api_key=${apiKey}&model_id=scribe_v2_realtime&language_code=en&sample_rate=16000`;
+    console.log('[STT] Direct WS URL: wss://api.elevenlabs.io/v1/speech-to-text/realtime?xi_api_key=<redacted>&...');
     return url;
   },
 };

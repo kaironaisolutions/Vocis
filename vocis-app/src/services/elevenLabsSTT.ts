@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SecureStorage } from './secureStorage';
 import { STTProxy } from './sttProxy';
 
-const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/stream';
+const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
 // Certificate pinning: SHA-256 pins for ElevenLabs API endpoint.
 // These should be updated when ElevenLabs rotates their certificates.
@@ -249,18 +249,8 @@ export class ElevenLabsSTTService {
         this.setState('connected');
         await RateLimiter.onSessionStart();
 
-        // Send initial configuration to the proxy (Worker transforms this into
-        // the correct ElevenLabs auth handshake before forwarding).
-        const initMsg = JSON.stringify({
-          type: 'config',
-          config: {
-            language: 'en',
-            encoding: 'pcm_16000',
-            sample_rate: 16000,
-          },
-        });
-        console.log('[STT] Sending init config:', initMsg);
-        this.ws?.send(initMsg);
+        // No init message needed — Scribe v2 Realtime is configured via URL
+        // query params (model_id, language_code, sample_rate) set in sttProxy.ts.
 
         // Enforce max session duration
         this.sessionTimeout = setTimeout(() => {
@@ -308,15 +298,21 @@ export class ElevenLabsSTTService {
   }
 
   private handleMessage(data: Record<string, unknown>) {
-    switch (data.type) {
-      case 'transcript':
+    // ElevenLabs Scribe v2 Realtime message types:
+    // https://elevenlabs.io/docs/api-reference/speech-to-text/realtime
+    switch (data.message_type) {
+      case 'session_started':
+        console.log('[STT] Session started, session_id:', data.session_id);
+        break;
+      case 'partial_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
-          // ElevenLabs may use isFinal (camelCase) or is_final (snake_case)
-          const isFinal = Boolean(data.isFinal ?? data.is_final);
-          this.callbacks.onTranscript({
-            type: isFinal ? 'final' : 'partial',
-            text: data.text,
-          });
+          this.callbacks.onTranscript({ type: 'partial', text: data.text });
+        }
+        break;
+      case 'committed_transcript':
+        if (typeof data.text === 'string' && data.text.trim()) {
+          console.log('[STT] Final transcript:', data.text);
+          this.callbacks.onTranscript({ type: 'final', text: data.text });
         }
         break;
       case 'error':
@@ -324,31 +320,43 @@ export class ElevenLabsSTTService {
           typeof data.message === 'string' ? data.message : 'Unknown server error'
         );
         break;
+      default:
+        console.log('[STT] Unknown message_type:', data.message_type);
     }
   }
 
   /**
    * Send an audio chunk to the WebSocket.
-   * Audio must be base64-encoded PCM 16kHz mono.
+   * Audio must be base64-encoded PCM 16kHz mono 16-bit.
    */
   sendAudio(base64Audio: string): void {
     if (this.state !== 'connected' || !this.ws) return;
 
     this.ws.send(
       JSON.stringify({
-        type: 'audio',
-        audio: base64Audio,
+        message_type: 'input_audio_chunk',
+        audio_base_64: base64Audio,
+        commit: false,
+        sample_rate: 16000,
       })
     );
   }
 
   /**
-   * Signal end of speech for the current utterance.
+   * Commit the audio buffer — signals end of the current utterance.
+   * ElevenLabs will finalize the transcript and emit committed_transcript.
    */
   flush(): void {
     if (this.state !== 'connected' || !this.ws) return;
 
-    this.ws.send(JSON.stringify({ type: 'flush' }));
+    this.ws.send(
+      JSON.stringify({
+        message_type: 'input_audio_chunk',
+        audio_base_64: '',
+        commit: true,
+        sample_rate: 16000,
+      })
+    );
   }
 
   async disconnect(): Promise<void> {

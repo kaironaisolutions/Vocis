@@ -89,7 +89,6 @@ export default {
         JSON.stringify({
           status: 'ok',
           apiKeyConfigured: Boolean(env.ELEVENLABS_API_KEY),
-          apiKeyLength: env.ELEVENLABS_API_KEY?.length ?? 0,
           tokenSecretConfigured: Boolean(env.TOKEN_SECRET),
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -165,22 +164,25 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   // Connect to ElevenLabs BEFORE accepting the client WebSocket.
   // CF Workers fetch() only accepts https:// — wss:// throws TypeError.
-  // The runtime performs the HTTP→WS upgrade internally when it sees
-  // Upgrade: websocket in the request headers.
-  console.log('[WS] Connecting to ElevenLabs...');
+  // Forward config query params (model_id, language_code, sample_rate) from
+  // the client request to ElevenLabs so the app controls session parameters.
+  const elevenLabsUrl = new URL('https://api.elevenlabs.io/v1/speech-to-text/realtime');
+  const forwardParams = ['model_id', 'language_code', 'sample_rate'];
+  for (const param of forwardParams) {
+    const value = url.searchParams.get(param);
+    if (value) elevenLabsUrl.searchParams.set(param, value);
+  }
+  console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
 
   let elevenLabsResp: Response;
   try {
-    elevenLabsResp = await fetch(
-      'https://api.elevenlabs.io/v1/speech-to-text/stream',
-      {
-        headers: {
-          'Upgrade': 'websocket',
-          'Connection': 'Upgrade',
-          'xi-api-key': env.ELEVENLABS_API_KEY,
-        },
-      }
-    );
+    elevenLabsResp = await fetch(elevenLabsUrl.toString(), {
+      headers: {
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+        'xi-api-key': env.ELEVENLABS_API_KEY,
+      },
+    });
     console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
   } catch (e) {
     console.error('[WS] ElevenLabs fetch threw:', e);
@@ -191,7 +193,6 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   if (!upstream) {
     console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status}`);
-    // Accept the client pair so we can cleanly close it
     const [clientErr, serverErr] = Object.values(new WebSocketPair());
     serverErr.accept();
     serverErr.close(1011, 'Upstream connection error');
@@ -199,67 +200,23 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   }
 
   upstream.accept();
-  console.log('[WS] ElevenLabs connected successfully');
+  console.log('[WS] ElevenLabs Scribe v2 Realtime connected ✅');
 
   // Now accept the client WebSocket
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
   console.log('[WS] Client WebSocket accepted');
 
-  let firstMessage = true;
-  let audioChunkCount = 0;
-
-  // App → ElevenLabs: transform message format
+  // Pure pass-through: the app sends correctly-formatted Scribe v2 Realtime
+  // messages — no transformation needed in the Worker.
+  let chunkCount = 0;
   server.addEventListener('message', (event) => {
     try {
-      if (typeof event.data !== 'string') {
-        // Raw binary — forward directly (shouldn't happen with current app but safe)
-        upstream.send(event.data);
-        return;
-      }
-
-      const msg = JSON.parse(event.data) as Record<string, unknown>;
-
-      if (msg.type === 'config') {
-        // App sends {type:'config',...} as its first message.
-        // ElevenLabs Scribe v2 expects {model:'scribe_v2'} as the first message instead.
-        if (firstMessage) {
-          firstMessage = false;
-          const initMsg = JSON.stringify({ model: 'scribe_v2' });
-          console.log('[WS] Sending ElevenLabs init:', initMsg);
-          upstream.send(initMsg);
-        }
-        return;
-      }
-
-      if (msg.type === 'audio' && typeof msg.audio === 'string') {
-        // Transform: {type:'audio', audio:'b64'} → {audio:'b64', flush:false}
-        if (firstMessage) {
-          // App skipped config — send init before first audio chunk
-          firstMessage = false;
-          upstream.send(JSON.stringify({ model: 'scribe_v2' }));
-          console.log('[WS] Sent late ElevenLabs init before first audio chunk');
-        }
-        audioChunkCount++;
-        if (audioChunkCount === 1) {
-          console.log('[WS] First audio chunk received — streaming started');
-        }
-        upstream.send(JSON.stringify({ audio: msg.audio, flush: false }));
-        return;
-      }
-
-      if (msg.type === 'flush') {
-        // Transform: {type:'flush'} → {flush:true}
-        console.log(`[WS] Flush received after ${audioChunkCount} audio chunks`);
-        upstream.send(JSON.stringify({ flush: true }));
-        return;
-      }
-
-      // Unknown message type — forward as-is
+      if (chunkCount === 0) console.log('[WS] First message from app received');
+      chunkCount++;
       upstream.send(event.data);
     } catch {
-      // Non-JSON — forward raw
-      try { upstream.send(event.data); } catch { /* upstream closed */ }
+      // upstream closed
     }
   });
 
