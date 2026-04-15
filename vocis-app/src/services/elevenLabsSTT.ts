@@ -315,6 +315,11 @@ export class ElevenLabsSTTService {
           this.callbacks.onTranscript({ type: 'final', text: data.text });
         }
         break;
+      case 'commit_throttled':
+        // Sent when commit:true arrives but ElevenLabs has received <1s of audio.
+        console.warn('[STT] commit_throttled — not enough audio was sent');
+        this.callbacks.onError('Recording too short. Please speak for at least 1 second.');
+        break;
       case 'error':
         this.callbacks.onError(
           typeof data.message === 'string' ? data.message : 'Unknown server error'

@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import {
   ElevenLabsSTTService,
   ConnectionState,
@@ -49,7 +50,6 @@ export function useRecording(): UseRecordingResult {
 
   const sttService = useRef<ElevenLabsSTTService | null>(null);
   const recording = useRef<Audio.Recording | null>(null);
-  const streamInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -168,22 +168,10 @@ export function useRecording(): UseRecordingResult {
 
       recording.current = newRecording;
       setIsRecording(true);
-
-      // Stream audio chunks every 250ms
-      streamInterval.current = setInterval(async () => {
-        if (!recording.current || !sttService.current) return;
-
-        try {
-          const status = await recording.current.getStatusAsync();
-          if (status.isRecording && status.uri) {
-            // In a production build, we'd read the audio buffer directly.
-            // The full native audio buffer streaming will be connected
-            // when building with EAS (native modules have direct buffer access).
-          }
-        } catch {
-          // Recording may have stopped between interval ticks
-        }
-      }, 250);
+      // Audio is read and sent in stopRecording() after the recording file is complete.
+      // On iOS/Expo Go the recording file does not grow on disk during active recording
+      // (the OS buffers audio internally), so streaming from the file mid-recording
+      // yields empty reads. Reading the complete file after stop is the reliable approach.
     } catch (err) {
       setError('Failed to start recording. Please try again.');
       setIsRecording(false);
@@ -191,10 +179,8 @@ export function useRecording(): UseRecordingResult {
   }, [handleTranscript, handleStateChange, handleError]);
 
   const stopRecording = useCallback(async () => {
-    if (streamInterval.current) {
-      clearInterval(streamInterval.current);
-      streamInterval.current = null;
-    }
+    // Capture the URI before stopping — expo-av clears it after unload.
+    const audioUri = recording.current?.getURI() ?? null;
 
     if (recording.current) {
       try {
@@ -206,17 +192,48 @@ export function useRecording(): UseRecordingResult {
     }
 
     if (sttService.current) {
-      sttService.current.flush();
+      if (audioUri) {
+        try {
+          // On iOS/Expo Go the recording file is only complete after stopAndUnloadAsync().
+          // Read the entire file now, skip the 44-byte WAV header, and send raw PCM
+          // as a single committed chunk to ElevenLabs.
+          const WAV_HEADER_BYTES = 44;
+          const info = await FileSystem.getInfoAsync(audioUri);
+
+          if (info.exists && 'size' in info && typeof info.size === 'number' && info.size > WAV_HEADER_BYTES) {
+            console.log('[Recording] Audio file size:', info.size, 'bytes');
+            const base64Audio = await FileSystem.readAsStringAsync(audioUri, {
+              encoding: 'base64',
+              position: WAV_HEADER_BYTES,
+            });
+
+            if (base64Audio && base64Audio.length > 50) {
+              console.log('[Recording] Sending audio, base64 length:', base64Audio.length);
+              sttService.current.sendAudio(base64Audio);
+              sttService.current.flush();
+            } else {
+              console.warn('[Recording] Audio data empty after read');
+              setError('No audio captured. Please try again.');
+            }
+          } else {
+            console.warn('[Recording] Audio file missing or too small:', info);
+            setError('Recording too short. Please speak and try again.');
+          }
+        } catch (err) {
+          console.error('[Recording] Failed to read audio file:', err);
+          setError('Failed to process recording. Please try again.');
+        }
+      }
+
+      // Give ElevenLabs time to process the audio and return the transcript.
       setTimeout(() => {
         sttService.current?.disconnect();
         sttService.current = null;
-      }, 500);
+      }, 3000);
     }
 
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-      });
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
     } catch {
       // Ignore cleanup errors
     }
