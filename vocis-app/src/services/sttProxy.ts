@@ -72,12 +72,11 @@ export const STTProxy = {
   },
 
   /**
-   * Build the direct ElevenLabs WebSocket URL (fallback mode).
-   * Used when no proxy is configured and API key is stored locally.
+   * Direct mode is disabled — API keys must never appear in WebSocket URLs
+   * because browser/runtime error output exposes the full URL on failure.
+   * All connections must go through the Cloudflare Worker proxy.
    */
   async getDirectWebSocketUrl(): Promise<string | null> {
-    const apiKey = await SecureStorage.getApiKey();
-    if (!apiKey) return null;
-    return `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${apiKey}`;
+    return null;
   },
 };
