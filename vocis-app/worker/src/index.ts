@@ -158,49 +158,40 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   }
 
   // Connect to ElevenLabs BEFORE accepting the client WebSocket.
-  // In Cloudflare Workers, outbound WebSocket connections MUST use fetch() with a
-  // wss:// URL (not https://, not new WebSocket()). The wss:// scheme is required
-  // for the Workers runtime to treat it as a WebSocket upgrade.
-  // xi-api-key is sent both as a header AND as a query param for maximum compatibility.
+  // This is the ONLY pattern that works in Cloudflare Workers for outbound WebSocket:
+  // fetch() with a wss:// URL. The xi-api-key header authenticates the connection.
   console.log('[WS] Connecting to ElevenLabs — API key length:', env.ELEVENLABS_API_KEY?.length ?? 0);
-
-  const elevenLabsUrl = `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${env.ELEVENLABS_API_KEY}`;
 
   let elevenLabsResp: Response;
   try {
-    elevenLabsResp = await fetch(elevenLabsUrl, {
-      headers: {
-        'xi-api-key': env.ELEVENLABS_API_KEY,
-        'Upgrade': 'websocket',
-        'Connection': 'Upgrade',
-      },
-    });
+    elevenLabsResp = await fetch(
+      'wss://api.elevenlabs.io/v1/speech-to-text/stream',
+      {
+        headers: {
+          'xi-api-key': env.ELEVENLABS_API_KEY,
+        },
+      }
+    );
     console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
   } catch (e) {
     console.error('[WS] ElevenLabs fetch threw:', e);
     return new Response('ElevenLabs fetch failed.', { status: 502 });
   }
 
-  if (!elevenLabsResp.webSocket) {
+  const upstream = elevenLabsResp.webSocket;
+
+  if (!upstream) {
     const body = await elevenLabsResp.text().catch(() => '');
-    console.error(`[WS] ElevenLabs no webSocket — HTTP ${elevenLabsResp.status} — ${body}`);
-    return new Response(
-      `ElevenLabs connection failed (${elevenLabsResp.status}): ${body}`,
-      { status: 502 }
-    );
+    console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status} — ${body}`);
+    // Accept the client pair so we can cleanly close it
+    const [clientErr, serverErr] = Object.values(new WebSocketPair());
+    serverErr.accept();
+    serverErr.close(1011, 'Upstream connection error');
+    return new Response(null, { status: 101, webSocket: clientErr });
   }
 
-  const upstream = elevenLabsResp.webSocket;
   upstream.accept();
-
-  // ElevenLabs Scribe v2 WebSocket protocol:
-  // 1. After connecting, send API key as first JSON message (auth handshake).
-  // 2. Audio chunks: {"audio": "<base64>", "flush": false}
-  // 3. End of stream: {"flush": true}
-  // The app sends a different format ({type:'config'}, {type:'audio', audio:...},
-  // {type:'flush'}) so the worker transforms messages in both directions.
-  upstream.send(JSON.stringify({ 'xi-api-key': env.ELEVENLABS_API_KEY }));
-  console.log('[WS] ElevenLabs auth message sent');
+  console.log('[WS] ElevenLabs connected successfully');
 
   // Now accept the client WebSocket
   const [client, server] = Object.values(new WebSocketPair());
