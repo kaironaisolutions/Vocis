@@ -194,30 +194,55 @@ export function useRecording(): UseRecordingResult {
     if (sttService.current) {
       if (audioUri) {
         try {
-          // On iOS/Expo Go the recording file is only complete after stopAndUnloadAsync().
-          // Read the entire file now, skip the 44-byte WAV header, and send raw PCM
-          // as a single committed chunk to ElevenLabs.
-          const WAV_HEADER_BYTES = 44;
-          const info = await FileSystem.getInfoAsync(audioUri);
+          // Read the complete WAV file as base64.
+          // Do NOT use the `position` option — it is unreliable in expo-file-system/legacy
+          // and causes the WAV header to leak into the audio data sent to ElevenLabs.
+          const base64Wav = await FileSystem.readAsStringAsync(
+            audioUri,
+            { encoding: FileSystem.EncodingType.Base64 }
+          );
 
-          if (info.exists && 'size' in info && typeof info.size === 'number' && info.size > WAV_HEADER_BYTES) {
-            console.log('[Recording] Audio file size:', info.size, 'bytes');
-            const base64Audio = await FileSystem.readAsStringAsync(audioUri, {
-              encoding: 'base64',
-              position: WAV_HEADER_BYTES,
-            });
+          // Decode base64 → raw bytes so we can inspect and strip the WAV header.
+          const binaryStr = atob(base64Wav);
+          const wavBytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            wavBytes[i] = binaryStr.charCodeAt(i);
+          }
 
-            if (base64Audio && base64Audio.length > 50) {
-              console.log('[Recording] Sending audio, base64 length:', base64Audio.length);
-              sttService.current.sendAudio(base64Audio);
-              sttService.current.flush();
-            } else {
-              console.warn('[Recording] Audio data empty after read');
-              setError('No audio captured. Please try again.');
-            }
+          // Verify the file is a valid WAV (RIFF magic bytes at offset 0).
+          const header = String.fromCharCode(wavBytes[0], wavBytes[1], wavBytes[2], wavBytes[3]);
+          console.log('[Recording] File header:', header, '— total bytes:', wavBytes.length);
+
+          // Strip the 44-byte WAV header — ElevenLabs requires raw PCM only.
+          const WAV_HEADER_SIZE = 44;
+          const pcmBytes = wavBytes.slice(WAV_HEADER_SIZE);
+
+          // 16kHz mono 16-bit PCM: 1 second = 16000 samples × 2 bytes = 32000 bytes.
+          const durationSecs = pcmBytes.length / (16000 * 2);
+          console.log('[Recording] PCM bytes:', pcmBytes.length);
+          console.log('[Recording] Audio duration:', durationSecs.toFixed(2), 'seconds');
+
+          if (pcmBytes.length < 3200) { // < 0.1 seconds
+            console.warn('[Recording] Audio too short — skipping');
+            setError('Recording too short. Please speak for at least 1 second.');
           } else {
-            console.warn('[Recording] Audio file missing or too small:', info);
-            setError('Recording too short. Please speak and try again.');
+            // Re-encode PCM bytes → base64 in chunks to avoid call-stack overflow
+            // on large recordings (String.fromCharCode spread crashes above ~100k bytes).
+            const bytesToBase64 = (bytes: Uint8Array): string => {
+              let binary = '';
+              const chunkSize = 8192;
+              for (let i = 0; i < bytes.length; i += chunkSize) {
+                const chunk = bytes.slice(i, i + chunkSize);
+                chunk.forEach((b) => { binary += String.fromCharCode(b); });
+              }
+              return btoa(binary);
+            };
+
+            const pcmBase64 = bytesToBase64(pcmBytes);
+            console.log('[Recording] Sending PCM base64 length:', pcmBase64.length);
+            sttService.current.sendAudio(pcmBase64);
+            sttService.current.flush();
+            console.log('[Recording] PCM audio sent, waiting for transcript...');
           }
         } catch (err) {
           console.error('[Recording] Failed to read audio file:', err);
