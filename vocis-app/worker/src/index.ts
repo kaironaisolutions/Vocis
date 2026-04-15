@@ -209,14 +209,21 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
 
   // Pure pass-through: the app sends correctly-formatted Scribe v2 Realtime
   // messages — no transformation needed in the Worker.
-  let chunkCount = 0;
   server.addEventListener('message', (event) => {
     try {
-      if (chunkCount === 0) console.log('[WS] First message from app received');
-      chunkCount++;
+      if (typeof event.data === 'string') {
+        try {
+          const msg = JSON.parse(event.data) as Record<string, unknown>;
+          console.log(
+            '[WS] → ElevenLabs message_type:', msg.message_type,
+            '| audio_base_64 length:', typeof msg.audio_base_64 === 'string' ? msg.audio_base_64.length : 0,
+            '| commit:', msg.commit
+          );
+        } catch { /* non-JSON, forward anyway */ }
+      }
       upstream.send(event.data);
-    } catch {
-      // upstream closed
+    } catch (e) {
+      console.error('[WS] upstream.send failed:', e);
     }
   });
 

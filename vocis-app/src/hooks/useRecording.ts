@@ -240,9 +240,11 @@ export function useRecording(): UseRecordingResult {
 
             const pcmBase64 = bytesToBase64(pcmBytes);
             console.log('[Recording] Sending PCM base64 length:', pcmBase64.length);
-            sttService.current.sendAudio(pcmBase64);
-            sttService.current.flush();
-            console.log('[Recording] PCM audio sent, waiting for transcript...');
+            // Send audio + commit in ONE message — ElevenLabs commits only the audio
+            // present in the commit:true message. Splitting into sendAudio + flush
+            // results in committing an empty buffer (0.00s audio).
+            sttService.current.sendFinalAudio(pcmBase64);
+            console.log('[Recording] PCM audio sent with commit:true, waiting for transcript...');
           }
         } catch (err) {
           console.error('[Recording] Failed to read audio file:', err);

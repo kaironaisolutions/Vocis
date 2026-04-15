@@ -348,8 +348,28 @@ export class ElevenLabsSTTService {
   }
 
   /**
+   * Send the final audio chunk with commit:true in a single message.
+   * ElevenLabs commits only the audio present in the commit:true message,
+   * so audio and commit MUST be in the same message — not split across two.
+   */
+  sendFinalAudio(base64Audio: string): void {
+    if (this.state !== 'connected' || !this.ws) return;
+
+    this.ws.send(
+      JSON.stringify({
+        message_type: 'input_audio_chunk',
+        audio_base_64: base64Audio,
+        commit: true,
+        sample_rate: 16000,
+      })
+    );
+  }
+
+  /**
    * Commit the audio buffer — signals end of the current utterance.
    * ElevenLabs will finalize the transcript and emit committed_transcript.
+   * NOTE: Only use this after streaming incremental chunks. For single-shot
+   * recordings, use sendFinalAudio() which combines audio + commit in one message.
    */
   flush(): void {
     if (this.state !== 'connected' || !this.ws) return;
