@@ -66,6 +66,79 @@ export default {
       return new Response('Expected WebSocket upgrade.', { status: 426 });
     }
 
+    // --- DIAGNOSTIC ENDPOINTS (remove before production) ---
+
+    if (url.pathname === '/test-key') {
+      try {
+        const resp = await fetch('https://api.elevenlabs.io/v1/user', {
+          headers: { 'xi-api-key': env.ELEVENLABS_API_KEY },
+        });
+        const body = await resp.text();
+        return Response.json({
+          status: resp.status,
+          body: body.substring(0, 300),
+          keyLength: env.ELEVENLABS_API_KEY?.length ?? 0,
+        });
+      } catch (e) {
+        return Response.json({ error: String(e) });
+      }
+    }
+
+    if (url.pathname === '/test-subscription') {
+      try {
+        const resp = await fetch('https://api.elevenlabs.io/v1/user/subscription', {
+          headers: { 'xi-api-key': env.ELEVENLABS_API_KEY },
+        });
+        const data = await resp.json() as Record<string, unknown>;
+        return Response.json({
+          httpStatus: resp.status,
+          tier: data.tier,
+          status: data.status,
+          characterCount: data.character_count,
+          characterLimit: data.character_limit,
+        });
+      } catch (e) {
+        return Response.json({ error: String(e) });
+      }
+    }
+
+    if (url.pathname === '/test-ws') {
+      // Try each ElevenLabs WebSocket URL variant and report which one gives webSocket
+      const variants = [
+        `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${env.ELEVENLABS_API_KEY}`,
+        `wss://api.elevenlabs.io/v1/speech-to-text/stream`,
+        `wss://api.elevenlabs.io/v1/speech-recognition/stream?xi_api_key=${env.ELEVENLABS_API_KEY}`,
+      ];
+      const results: Record<string, unknown>[] = [];
+      for (const variant of variants) {
+        try {
+          const resp = await fetch(variant, {
+            headers: { 'Upgrade': 'websocket', 'Connection': 'Upgrade', 'xi-api-key': env.ELEVENLABS_API_KEY },
+          });
+          const body = resp.webSocket ? '(webSocket object present)' : await resp.text().catch(() => '');
+          results.push({
+            url: variant.replace(/xi_api_key=[^&]+/, 'xi_api_key=<redacted>'),
+            status: resp.status,
+            hasWebSocket: !!resp.webSocket,
+            body: body.substring(0, 200),
+          });
+          if (resp.webSocket) {
+            resp.webSocket.accept();
+            resp.webSocket.close(1000, 'diagnostic test');
+            break; // Found one that works — stop
+          }
+        } catch (e) {
+          results.push({
+            url: variant.replace(/xi_api_key=[^&]+/, 'xi_api_key=<redacted>'),
+            error: String(e),
+          });
+        }
+      }
+      return Response.json({ results });
+    }
+
+    // --- END DIAGNOSTIC ENDPOINTS ---
+
     if (url.pathname === '/health') {
       return new Response(
         JSON.stringify({
