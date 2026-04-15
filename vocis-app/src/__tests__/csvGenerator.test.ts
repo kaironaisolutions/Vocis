@@ -142,6 +142,8 @@ describe('getExportFilename', () => {
 });
 
 describe('CSV injection prevention', () => {
+  // raw_title starts with formula chars — these map directly to the Title
+  // column in custom and shopify formats, so they must be prefixed with '.
   const maliciousItems: InventoryItem[] = [
     {
       id: 'item-evil',
@@ -149,7 +151,7 @@ describe('CSV injection prevention', () => {
       decade: "90's",
       item_name: '=CMD|"/C calc"!A1',
       price: 50.0,
-      raw_title: "(M) 90's =CMD|\"/C calc\"!A1",
+      raw_title: '=CMD|"/C calc"!A1',
       session_id: 'session-1',
       logged_at: '2026-04-13T14:32:00Z',
     },
@@ -159,7 +161,34 @@ describe('CSV injection prevention', () => {
       decade: "80's",
       item_name: '+SUM(A1:A10)',
       price: 75.0,
-      raw_title: "(L) 80's +SUM(A1:A10)",
+      raw_title: '+SUM(A1:A10)',
+      session_id: 'session-1',
+      logged_at: '2026-04-13T14:33:00Z',
+    },
+  ];
+
+  // eBay title is always "{decade} {item_name}" — the decade prefix means the
+  // formula char is never at position 0 of the cell, so injection is
+  // architecturally impossible via item_name alone. Test with a formula-char
+  // decade to exercise the sanitizer on the composed title field.
+  const ebayMaliciousItems: InventoryItem[] = [
+    {
+      id: 'item-evil-ebay',
+      size: 'M',
+      decade: "=90's",
+      item_name: 'Polo Shirt',
+      price: 50.0,
+      raw_title: "=90's Polo Shirt",
+      session_id: 'session-1',
+      logged_at: '2026-04-13T14:32:00Z',
+    },
+    {
+      id: 'item-evil-ebay2',
+      size: 'L',
+      decade: "+80's",
+      item_name: 'Nike Tee',
+      price: 30.0,
+      raw_title: "+80's Nike Tee",
       session_id: 'session-1',
       logged_at: '2026-04-13T14:33:00Z',
     },
@@ -167,23 +196,22 @@ describe('CSV injection prevention', () => {
 
   it('sanitizes formula-like values in custom format', () => {
     const csv = generateCSV(maliciousItems, 'custom');
-    // The =CMD in raw_title after space should be sanitized
+    // raw_title starts with = and + — must be prefixed with ' in Title column
     expect(csv).toContain("'=CMD");
-    // +SUM at start of raw_title content should be sanitized
     expect(csv).toContain("'+SUM");
   });
 
   it('sanitizes formula-like values in shopify format', () => {
     const csv = generateCSV(maliciousItems, 'shopify');
+    // raw_title starts with = and + — must be prefixed with ' in Title column
     expect(csv).toContain("'=CMD");
     expect(csv).toContain("'+SUM");
   });
 
   it('sanitizes formula-like values in ebay format', () => {
-    const csv = generateCSV(maliciousItems, 'ebay');
-    // eBay title is "90's =CMD..." — =CMD after space gets sanitized
-    expect(csv).toContain("'=CMD");
-    // "+SUM" at start of item_name
-    expect(csv).toContain("'+SUM");
+    const csv = generateCSV(ebayMaliciousItems, 'ebay');
+    // eBay Title = "{decade} {item_name}" — decade starts with formula char
+    expect(csv).toContain("'=90");
+    expect(csv).toContain("'+80");
   });
 });

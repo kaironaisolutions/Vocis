@@ -53,7 +53,8 @@
       [
         "expo-sqlite",
         {
-          "enableFTS": true
+          "enableFTS": true,
+          "useSQLCipher": true
         }
       ],
       "expo-secure-store",
@@ -63,7 +64,13 @@
           "microphonePermission": "Vocis needs microphone access to record voice inventory entries."
         }
       ],
-      "expo-mail-composer"
+      "expo-mail-composer",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Vocis uses Face ID to protect your inventory data during export."
+        }
+      ]
     ],
     "extra": {
       "eas": {

@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+import * as Crypto from 'expo-crypto';
 
 const API_KEY_STORAGE_KEY = 'vocis_elevenlabs_api_key';
 const DB_ENCRYPTION_KEY = 'vocis_db_encryption_key';
@@ -56,7 +57,7 @@ export const SecureStorage = {
 
     if (!key) {
       // Generate a cryptographically random key
-      key = generateRandomKey(64);
+      key = await generateRandomKey(64);
       await SecureStore.setItemAsync(DB_ENCRYPTION_KEY, key, {
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       });
@@ -67,23 +68,12 @@ export const SecureStorage = {
 };
 
 /**
- * Generate a cryptographically secure random key.
- * Requires crypto.getRandomValues — throws if unavailable.
- * Never falls back to Math.random which is not cryptographically secure.
+ * Generate a cryptographically secure random key via expo-crypto.
+ * Uses expo-crypto.getRandomBytesAsync — works on iOS, Android, and web.
  */
-function generateRandomKey(length: number): string {
+async function generateRandomKey(length: number): Promise<string> {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const values = new Uint8Array(length);
-
-  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
-    throw new Error(
-      'crypto.getRandomValues is not available. Cannot generate secure encryption key. ' +
-      'This should not happen in a React Native environment.'
-    );
-  }
-
-  globalThis.crypto.getRandomValues(values);
-
+  const values = await Crypto.getRandomBytesAsync(length);
   let result = '';
   for (let i = 0; i < length; i++) {
     result += chars[values[i] % chars.length];

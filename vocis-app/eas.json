@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "ios": {
-        "simulator": true
+        "simulator": false
       }
     },
     "preview": {
@@ -23,7 +23,8 @@
     "production": {
       "autoIncrement": true,
       "ios": {
-        "image": "latest"
+        "image": "latest",
+        "distribution": "store"
       },
       "android": {
         "buildType": "app-bundle"

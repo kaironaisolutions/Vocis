@@ -11,5 +11,7 @@ RATE_LIMIT_DAILY = "120"
 # Session token expiry in seconds (5 minutes)
 TOKEN_TTL_SECONDS = "300"
 
-# Set via `wrangler secret put ELEVENLABS_API_KEY`
-# NEVER put the actual key here — use secrets only
+# Secrets — set via `wrangler secret put <NAME>`:
+#   ELEVENLABS_API_KEY  — ElevenLabs API key
+#   TOKEN_SECRET        — HMAC signing key: openssl rand -hex 32
+# NEVER put actual values here — use secrets only

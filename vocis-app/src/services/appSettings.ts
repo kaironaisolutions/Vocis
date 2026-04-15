@@ -1,9 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 
 const KEYS = {
   AUTO_PURGE_ENABLED: 'vocis_auto_purge_enabled',
   AUTO_PURGE_DAYS: 'vocis_auto_purge_days',
   LAST_PURGE_DATE: 'vocis_last_purge_date',
+  // Export PIN flag controls a security gate — stored in SecureStore (Keychain/Keystore),
+  // not AsyncStorage, so it cannot be tampered with on a rooted/jailbroken device.
   EXPORT_PIN_ENABLED: 'vocis_export_pin_enabled',
 } as const;
 
@@ -24,7 +27,8 @@ export const AppSettingsService = {
     const [enabled, days, exportPin] = await Promise.all([
       AsyncStorage.getItem(KEYS.AUTO_PURGE_ENABLED),
       AsyncStorage.getItem(KEYS.AUTO_PURGE_DAYS),
-      AsyncStorage.getItem(KEYS.EXPORT_PIN_ENABLED),
+      // Export PIN is in SecureStore — not AsyncStorage — to prevent tampering.
+      SecureStore.getItemAsync(KEYS.EXPORT_PIN_ENABLED),
     ]);
 
     return {
@@ -42,7 +46,9 @@ export const AppSettingsService = {
   },
 
   async setExportPin(enabled: boolean): Promise<void> {
-    await AsyncStorage.setItem(KEYS.EXPORT_PIN_ENABLED, String(enabled));
+    await SecureStore.setItemAsync(KEYS.EXPORT_PIN_ENABLED, String(enabled), {
+      keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
   },
 
   async getLastPurgeDate(): Promise<string | null> {

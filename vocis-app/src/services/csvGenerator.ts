@@ -2,20 +2,26 @@ import Papa from 'papaparse';
 import { InventoryItem, ExportFormat } from '../types';
 
 /**
- * Sanitize a string value to prevent CSV injection (formula injection).
- * Values containing =, +, -, @ at the start OR after common prefixes
- * can be interpreted as formulas by Excel/Google Sheets.
- * Removes dangerous characters that could trigger formula evaluation.
+ * Sanitize a string value to prevent CSV formula injection.
+ *
+ * Defense-in-depth approach:
+ * 1. Strip null bytes and control characters (except tab/newline — PapaParse handles those).
+ * 2. Prefix any cell starting with a formula trigger char (=, +, -, @, tab, CR) with a
+ *    single-quote so spreadsheet apps treat it as text rather than a formula.
+ *
+ * PapaParse is called with `quotes: true` which double-quotes every field, providing
+ * an additional layer. The prefix handles the remaining case where some apps (Excel
+ * on Windows) interpret formulas even inside quoted cells.
  */
 function sanitizeCSVValue(value: string): string {
-  // Replace any formula trigger characters at the start with safe versions
-  let sanitized = value;
-  if (/^[=+\-@\t\r]/.test(sanitized)) {
+  // Strip null bytes and ASCII control characters (0x00–0x1F except 0x09 tab and 0x0A LF)
+  let sanitized = value.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, '');
+
+  // Prefix formula trigger characters at the start of the value
+  if (/^[=+\-@\t\r|]/.test(sanitized)) {
     sanitized = `'${sanitized}`;
   }
-  // Also sanitize formula triggers that appear after parentheses/spaces
-  // e.g. "(M) 90's =CMD..." — the =CMD could be parsed by some spreadsheets
-  sanitized = sanitized.replace(/(?<=\s)[=+@](?=[A-Za-z])/g, (match) => `'${match}`);
+
   return sanitized;
 }
 

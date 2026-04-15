@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import Constants from 'expo-constants';
 import { Colors, Typography, Spacing, BorderRadius, Shadows } from '../src/constants/theme';
 import { Button } from '../src/components/Button';
 import { ItemPreviewCard } from '../src/components/ItemPreviewCard';
@@ -104,6 +105,43 @@ export default function RecordScreen() {
       Alert.alert('Error', errorMsg, [{ text: 'OK', onPress: () => setErrorMsg(null) }]);
     }
   }, [errorMsg]);
+
+  // --- Startup connectivity diagnostic (dev only — reads proxy config and tests /health + /token) ---
+  useEffect(() => {
+    const proxyUrl = (Constants.expoConfig?.extra?.sttProxyUrl as string) || '';
+    console.log('[DIAG] expoConfig.extra:', JSON.stringify(Constants.expoConfig?.extra));
+    console.log('[DIAG] sttProxyUrl:', proxyUrl || '(EMPTY — proxy disabled)');
+
+    if (!proxyUrl) {
+      console.warn('[DIAG] sttProxyUrl is empty. App will try direct ElevenLabs connection.');
+      return;
+    }
+
+    (async () => {
+      try {
+        const healthRes = await fetch(`${proxyUrl}/health`);
+        const health = await healthRes.json();
+        console.log('[DIAG] /health:', JSON.stringify(health));
+      } catch (e) {
+        console.error('[DIAG] /health fetch failed:', e);
+      }
+
+      try {
+        const tokenRes = await fetch(`${proxyUrl}/token`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Device-ID': (Constants as any).installationId || Constants.sessionId || 'diag-test',
+          },
+        });
+        console.log('[DIAG] /token status:', tokenRes.status);
+        const tokenBody = await tokenRes.text();
+        console.log('[DIAG] /token body:', tokenBody.slice(0, 200));
+      } catch (e) {
+        console.error('[DIAG] /token fetch failed:', e);
+      }
+    })();
+  }, []);
 
   // --- Cleanup on unmount ---
   useEffect(() => {
