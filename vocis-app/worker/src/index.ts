@@ -71,6 +71,7 @@ export default {
         JSON.stringify({
           status: 'ok',
           apiKeyConfigured: Boolean(env.ELEVENLABS_API_KEY),
+          apiKeyLength: env.ELEVENLABS_API_KEY?.length ?? 0,
           tokenSecretConfigured: Boolean(env.TOKEN_SECRET),
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -156,50 +157,111 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     return new Response('Server configuration error: API key not set.', { status: 503 });
   }
 
-  // Create WebSocket pair for the client
+  // Connect to ElevenLabs BEFORE accepting the client WebSocket.
+  // In Cloudflare Workers, outbound WebSocket connections MUST use fetch() with a
+  // wss:// URL (not https://, not new WebSocket()). The wss:// scheme is required
+  // for the Workers runtime to treat it as a WebSocket upgrade.
+  // xi-api-key is sent both as a header AND as a query param for maximum compatibility.
+  console.log('[WS] Connecting to ElevenLabs — API key length:', env.ELEVENLABS_API_KEY?.length ?? 0);
+
+  const elevenLabsUrl = `wss://api.elevenlabs.io/v1/speech-to-text/stream?xi_api_key=${env.ELEVENLABS_API_KEY}`;
+
+  let elevenLabsResp: Response;
+  try {
+    elevenLabsResp = await fetch(elevenLabsUrl, {
+      headers: {
+        'xi-api-key': env.ELEVENLABS_API_KEY,
+        'Upgrade': 'websocket',
+        'Connection': 'Upgrade',
+      },
+    });
+    console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
+  } catch (e) {
+    console.error('[WS] ElevenLabs fetch threw:', e);
+    return new Response('ElevenLabs fetch failed.', { status: 502 });
+  }
+
+  if (!elevenLabsResp.webSocket) {
+    const body = await elevenLabsResp.text().catch(() => '');
+    console.error(`[WS] ElevenLabs no webSocket — HTTP ${elevenLabsResp.status} — ${body}`);
+    return new Response(
+      `ElevenLabs connection failed (${elevenLabsResp.status}): ${body}`,
+      { status: 502 }
+    );
+  }
+
+  const upstream = elevenLabsResp.webSocket;
+  upstream.accept();
+
+  // ElevenLabs Scribe v2 WebSocket protocol:
+  // 1. After connecting, send API key as first JSON message (auth handshake).
+  // 2. Audio chunks: {"audio": "<base64>", "flush": false}
+  // 3. End of stream: {"flush": true}
+  // The app sends a different format ({type:'config'}, {type:'audio', audio:...},
+  // {type:'flush'}) so the worker transforms messages in both directions.
+  upstream.send(JSON.stringify({ 'xi-api-key': env.ELEVENLABS_API_KEY }));
+  console.log('[WS] ElevenLabs auth message sent');
+
+  // Now accept the client WebSocket
   const [client, server] = Object.values(new WebSocketPair());
-
-  // Connect upstream to ElevenLabs with the real API key
-  const upstreamUrl = `wss://api.elevenlabs.io/v1/speech-to-text/stream?api_key=${env.ELEVENLABS_API_KEY}`;
-
-  // Accept the client connection immediately
   server.accept();
+  console.log('[WS] Client WebSocket accepted');
 
-  // Set up upstream connection
-  const upstream = new WebSocket(upstreamUrl);
+  let audioChunkCount = 0;
 
-  // Track connection state
-  let upstreamReady = false;
-  const pendingMessages: (string | ArrayBuffer)[] = [];
-
-  // Relay: client → upstream
+  // App → ElevenLabs: transform message format
   server.addEventListener('message', (event) => {
-    if (upstreamReady) {
+    try {
+      if (typeof event.data !== 'string') {
+        // Raw binary — forward directly (shouldn't happen with current app but safe)
+        upstream.send(event.data);
+        return;
+      }
+
+      const msg = JSON.parse(event.data) as Record<string, unknown>;
+
+      if (msg.type === 'config') {
+        // App sends config on open; ElevenLabs auth already handled above — suppress.
+        console.log('[WS] Config message suppressed (auth already sent)');
+        return;
+      }
+
+      if (msg.type === 'audio' && typeof msg.audio === 'string') {
+        // Transform: {type:'audio', audio:'b64'} → {audio:'b64', flush:false}
+        audioChunkCount++;
+        if (audioChunkCount === 1) {
+          console.log('[WS] First audio chunk received — streaming started');
+        }
+        upstream.send(JSON.stringify({ audio: msg.audio, flush: false }));
+        return;
+      }
+
+      if (msg.type === 'flush') {
+        // Transform: {type:'flush'} → {flush:true}
+        console.log(`[WS] Flush received after ${audioChunkCount} audio chunks`);
+        upstream.send(JSON.stringify({ flush: true }));
+        return;
+      }
+
+      // Unknown message type — forward as-is
       upstream.send(event.data);
-    } else {
-      pendingMessages.push(event.data);
+    } catch {
+      // Non-JSON — forward raw
+      try { upstream.send(event.data); } catch { /* upstream closed */ }
     }
   });
 
   server.addEventListener('close', () => {
-    try {
-      upstream.close(1000, 'Client disconnected');
-    } catch {
-      // Already closed
-    }
+    console.log('[WS] Client disconnected');
+    try { upstream.close(1000, 'Client disconnected'); } catch { /* already closed */ }
   });
 
-  // Relay: upstream → client
-  upstream.addEventListener('open', () => {
-    upstreamReady = true;
-    for (const msg of pendingMessages) {
-      upstream.send(msg);
-    }
-    pendingMessages.length = 0;
-  });
-
+  // ElevenLabs → app: forward transcript responses directly
   upstream.addEventListener('message', (event: MessageEvent) => {
     try {
+      if (typeof event.data === 'string') {
+        console.log('[WS] ElevenLabs →', event.data.slice(0, 120));
+      }
       server.send(event.data);
     } catch {
       // Client may have disconnected
@@ -207,19 +269,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   });
 
   upstream.addEventListener('close', (event: CloseEvent) => {
-    try {
-      server.close(event.code || 1000, event.reason || 'Upstream closed');
-    } catch {
-      // Already closed
-    }
+    console.log(`[WS] ElevenLabs closed: code=${event.code} reason=${event.reason}`);
+    try { server.close(event.code || 1000, event.reason || 'Upstream closed'); } catch { /* already closed */ }
   });
 
-  upstream.addEventListener('error', () => {
-    try {
-      server.close(1011, 'Upstream connection error');
-    } catch {
-      // Already closed
-    }
+  upstream.addEventListener('error', (err) => {
+    console.error('[WS] ElevenLabs error:', err);
+    try { server.close(1011, 'Upstream error'); } catch { /* already closed */ }
   });
 
   return new Response(null, {
