@@ -427,6 +427,68 @@ describe('PRICE BUG — must all return correct price', () => {
 // "$2,000" into "$2" and "000" — yielding price=2, item_name="000".
 // parseTranscript now normalizes "$2,000" → "$2000" before routing.
 
+// ── MERGE PRICE-PRESERVATION REGRESSION ────────────────────────────────────
+//
+// Pinning the contract: when a later utterance has price=null, mergeItems
+// MUST preserve the existing price. The `??` operator handles this for both
+// null and undefined, so undefined fields sneaking in via partial objects
+// are also covered.
+
+describe('mergeItems — price preservation across null incoming', () => {
+  it('price preserved when next transcript has no price', () => {
+    let item = mergeItems(
+      { ...EMPTY_ITEM },
+      { ...EMPTY_ITEM, price: 90 }
+    );
+    expect(item.price).toBe(90);
+
+    item = mergeItems(
+      item,
+      { ...EMPTY_ITEM, size: 'S', decade: "90's", price: null }
+    );
+    expect(item.price).toBe(90);
+    expect(item.size).toBe('S');
+    expect(item.decade).toBe("90's");
+  });
+
+  it('all fields preserved across 5 partial commits', () => {
+    let item: ParsedItem = { ...EMPTY_ITEM };
+
+    item = mergeItems(item, parseTranscript('small'));
+    item = mergeItems(item, parseTranscript('$95'));
+    expect(item.price).toBe(95);
+
+    item = mergeItems(item, parseTranscript('90s'));
+    expect(item.price).toBe(95);
+    expect(item.size).toBe('S');
+
+    item = mergeItems(item, parseTranscript('Nike hoodie'));
+    expect(item.price).toBe(95);
+    expect(item.size).toBe('S');
+    expect(item.decade).toBe("90's");
+
+    item = mergeItems(item, parseTranscript('small'));
+    expect(item.price).toBe(95);
+  });
+
+  it('undefined fields in partial existing object also fall through', () => {
+    // Defends against the symptom in logs where `previous?.price` shows
+    // undefined (because previous was null and optional chaining produced
+    // undefined). `??` returns RHS for both null and undefined.
+    const partial = {
+      size: undefined as unknown as null,
+      decade: undefined as unknown as null,
+      item_name: undefined as unknown as null,
+      price: undefined as unknown as null,
+      raw_title: '',
+      raw_transcript: '',
+      confidence: 0,
+    };
+    const merged = mergeItems(partial, { ...EMPTY_ITEM, price: 90 });
+    expect(merged.price).toBe(90);
+  });
+});
+
 describe('PRICE BUG — comma-formatted thousands', () => {
   it('"$2,000" → 2000', () => {
     expect(parseTranscript('$2,000').price).toBe(2000);
