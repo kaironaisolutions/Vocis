@@ -527,6 +527,8 @@ describe('isValidTranscript filter', () => {
     '9', '5', '0',                // 1-digit
     '1930', '1990', '2000', '12345',  // 4+ digit (years/runaway)
     '60', '70', '80', '90',           // ambiguous decade-suffix bare numbers
+    '00', '000', '0000',              // pure-zero fragments
+    '-4', '-439',                     // negative numbers
     ',300', '1930.',
     'be', 'for', 'a', 'an', 'the', 'um', 'uh',
     '',
@@ -564,10 +566,20 @@ describe('price: ElevenLabs bare-number formats', () => {
     ['$25', 25], ['$75', 75], ['$300', 300], ['$80', 80],
     ['25', 25], ['30', 30], ['45', 45], ['75', 75],
     ['80', 80], ['90', 90], ['100', 100], ['150', 150],
-    ['300', 300], ['999', 999],
+    ['300', 300],
   ];
   test.each(cases)('"%s" → price: %d', (input, expected) => {
     expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+describe('price: out-of-range values are rejected', () => {
+  const rejected: string[] = [
+    '$530', '$999', '$1000',  // explicit-dollar above $500 cap
+    '999', '530',              // bare numbers above $500 cap
+  ];
+  test.each(rejected)('"%s" → price: null', (input) => {
+    expect(parseTranscript(input).price).toBeNull();
   });
 });
 
@@ -706,6 +718,28 @@ describe('Price detection — every real inventory price point', () => {
   ];
   test.each(all)('%s → %d', (input, expected) => {
     expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+// Single-word filler / mishear fragments must NOT become item_name. Real
+// items (Nike, Carhartt — already kept by being legit single-word brands
+// that aren't in the invalid list) and multi-word names ("Call Sign Jacket")
+// are unaffected.
+describe('Single-word filler/mishear words must not become item_name', () => {
+  const fillers = ['call', 'song', 'car', 'count', 'monkey', 'parts', 'good'];
+  test.each(fillers)('"%s" → item_name null', (input) => {
+    const r = parseTranscript(input);
+    expect(r.item_name).toBeNull();
+  });
+
+  it('Nike alone is still a valid item_name', () => {
+    expect(parseTranscript('Nike').item_name).toBe('Nike');
+  });
+
+  it('multi-word phrase containing a filler word is preserved', () => {
+    const r = parseTranscript('Call Sign Jacket');
+    expect(r.item_name?.toLowerCase()).toContain('call');
+    expect(r.item_name?.toLowerCase()).toContain('sign');
   });
 });
 

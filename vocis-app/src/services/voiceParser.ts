@@ -73,8 +73,9 @@ export function isValidTranscript(text: string): boolean {
   // Pure-digit fragments. The rules:
   //   - 1-digit:  too short, always junk
   //   - 4+ digit: years and runaway streaming fragments
+  //   - "00", "000": pure-zero fragments
   //   - 60, 70, 80, 90: ambiguous between price and decade fragment
-  //     ("90s" without the 's'). Per real-inventory observations these
+  //     ("90s" without the 's"). Per real-inventory observations these
   //     are more often partial decade words than prices, so we drop
   //     them. Real prices come through as "$60" / "60 dollars" /
   //     "sixty dollars" via Patterns A/B and the written-words list.
@@ -83,10 +84,15 @@ export function isValidTranscript(text: string): boolean {
   //     "dollars" word.
   if (/^\d+$/.test(t)) {
     if (t.length < 2 || t.length > 3) return false;
+    if (/^0+$/.test(t)) return false;
     const num = parseInt(t, 10);
     if (num === 60 || num === 70 || num === 80 || num === 90) return false;
     return true;
   }
+
+  // Negative numbers: "-439", "-4". These leak through Scribe occasionally
+  // and aren't valid prices.
+  if (/^-\d+$/.test(t)) return false;
 
   // Numeric with trailing punctuation only: "1930.", "93," — apply the same
   // length rule to the digit part.
@@ -656,28 +662,32 @@ function detectPriceInWords(
     }
   }
 
-  // Pattern B: $-prefixed token
+  // Pattern B: $-prefixed token. Capped at $500 — anything above is
+  // almost always a streaming artifact ("$530", "$1500"). Real high-end
+  // vintage prices in the inventory top out at $320; the cap leaves some
+  // headroom but rejects clearly-out-of-range values.
   for (let i = 0; i < words.length; i++) {
     if (consumed.has(i)) continue;
     if (!words[i].startsWith('$')) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
     const num = parseFloat(cleaned);
-    if (!isNaN(num) && num > 0) {
+    if (!isNaN(num) && num >= 1 && num <= 500) {
       return { value: num, start: i, end: i };
     }
   }
 
   // Pattern C: bare numeric token, optionally followed by "dollars".
   // 4+ digit integers are rejected — they're almost always years
-  // ("1930", "2000") or runaway streaming fragments. Real 4-digit prices
-  // need to come in via Pattern A ("$1500") or Pattern B ("1500 dollars").
+  // ("1930", "2000") or runaway streaming fragments. Range cap of
+  // $1–$500 rejects out-of-range values like "530" or "999". Real 4-digit
+  // prices need to come in via Pattern B ("1500 dollars").
   for (let i = words.length - 1; i >= 0; i--) {
     if (consumed.has(i)) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
     if (!/^\d+(?:\.\d{1,2})?$/.test(cleaned)) continue;
     if (/^\d{4,}$/.test(cleaned)) continue;
     const num = parseFloat(cleaned);
-    if (num > 0) {
+    if (num >= 1 && num <= 500) {
       let end = i;
       if (
         i + 1 < words.length &&
@@ -720,6 +730,36 @@ function detectPriceInWords(
  * `itemName` here is whatever text was left after size/decade/price words
  * were claimed. Empty or filler-only input becomes `item_name: null`.
  */
+/**
+ * Single-word strings that should never become an item_name on their own.
+ * These are common ElevenLabs mishears (e.g. "Carhartt" → "car parts" →
+ * "car") plus generic filler. Multi-word names that *contain* these words
+ * are still allowed — the rejection only fires when the entire item_name
+ * after extraction is one of these tokens.
+ */
+const INVALID_SINGLE_WORD_ITEM_NAMES = new Set([
+  // Articles, prepositions, conjunctions
+  'for', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of', 'by',
+  'or', 'and', 'but', 'as', 'so', 'with',
+  // Common verbs
+  'be', 'do', 'go', 'got', 'get', 'set',
+  'call', 'song', 'have', 'had', 'has',
+  'is', 'was', 'are', 'were', 'been',
+  'see', 'say', 'said', 'come', 'came', 'gone', 'went',
+  // Pronouns
+  'it', 'its', 'we', 'i', 'me', 'my',
+  'he', 'she', 'they', 'you', 'your',
+  // Common Scribe mishears for brand fragments
+  'car', 'can', 'count', 'monkey', 'monkeys', 'county', 'counties',
+  'parts', 'park', 'pile',
+  // Generic adjectives / quantifiers
+  'all', 'some', 'any', 'no', 'one', 'two', 'three',
+  'nice', 'good', 'great', 'new', 'old',
+  // Filler
+  'um', 'uh', 'oh', 'ah', 'well', 'like',
+  'okay', 'ok', 'yeah', 'yes',
+]);
+
 function buildResult(
   size: string | null,
   decade: string | null,
@@ -730,7 +770,18 @@ function buildResult(
   // Without this, "Nike Hoodie. Twenty five dollars" leaves "Nike Hoodie."
   // as the item name, including the period.
   const trimmed = itemName.trim().replace(/^[\s,.;!?]+|[\s,.;!?]+$/g, '');
-  const item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
+  let item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
+
+  // Reject single-word item_names that are common filler / mishear
+  // fragments. A real brand or garment name is almost always 2+ words
+  // (for the rare single-word brand like "Nike", that's a real keyterm
+  // and shouldn't be in the invalid set). If the result is a single
+  // word AND it's in the invalid set, drop it.
+  if (item_name !== null && !item_name.includes(' ')) {
+    if (INVALID_SINGLE_WORD_ITEM_NAMES.has(item_name.toLowerCase())) {
+      item_name = null;
+    }
+  }
 
   const confidence =
     (size !== null ? 25 : 0) +

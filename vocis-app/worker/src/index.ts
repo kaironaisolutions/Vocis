@@ -68,22 +68,43 @@ export default {
 
     const url = new URL(request.url);
 
-    // CORS: mobile apps (React Native) do not send an Origin header, so they are
-    // unaffected by CORS policy. The wildcard is narrowed to block web-browser abuse
-    // while keeping OPTIONS pre-flight working for any legitimate web client.
-    // Sensitive endpoints (/token, /stream) are protected by device-ID rate limiting
-    // and HMAC token validation, which are the actual security boundaries.
+    // CORS resolution.
+    //
+    // Mobile apps (React Native) do not send an Origin header, so they are
+    // unaffected. Web clients we want to support:
+    //   - https://vocis-app.com   (production web)
+    //   - exp:// , vocis://       (deep links)
+    //   - http://localhost:*      (Expo web dev server, default :8081)
+    //   - http://127.0.0.1:*
+    //   - https://*.expo.dev      (Expo tunnel domains)
+    //
+    // Anything else gets a wildcard fallback. The actual security boundaries
+    // are HMAC-signed tokens on /stream and per-device rate limits on
+    // /token, not CORS — CORS is just the browser's same-origin politeness
+    // layer. The previous implementation set the header to the literal
+    // string "null" for unknown origins, which Chrome treats as an invalid
+    // value and refuses, blocking every web request including /health.
     const origin = request.headers.get('Origin') ?? '';
-    const allowedOrigins = ['https://vocis-app.com', 'exp://', 'vocis://'];
-    const corsOrigin = allowedOrigins.some((o) => origin.startsWith(o)) ? origin : 'null';
+    const ALLOW_PREFIXES = ['https://vocis-app.com', 'exp://', 'vocis://'];
+    const ALLOW_PATTERNS = [
+      /^https?:\/\/localhost(:\d+)?$/,
+      /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
+      /^https:\/\/[a-z0-9-]+\.expo\.dev$/,
+    ];
+    const isAllowedOrigin =
+      origin !== '' &&
+      (ALLOW_PREFIXES.some((p) => origin.startsWith(p)) ||
+        ALLOW_PATTERNS.some((p) => p.test(origin)));
+    const corsOrigin = origin === '' ? '*' : isAllowedOrigin ? origin : '*';
     const corsHeaders = {
       'Access-Control-Allow-Origin': corsOrigin,
       'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Device-ID',
+      'Access-Control-Max-Age': '86400',
     };
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     if (url.pathname === '/token' && request.method === 'POST') {

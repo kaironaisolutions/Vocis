@@ -204,10 +204,41 @@ export class ElevenLabsSTTService {
   /**
    * Provide a list of domain-specific terms to bias the model toward.
    * Must be called before connect() — keyterms are sent right after the
-   * WebSocket opens.
+   * server emits session_started.
    */
   setKeyterms(terms: string[]): void {
     this.keyterms = terms.slice(0, 250);
+  }
+
+  /**
+   * Send the per-session config (currently just keyword biasing) to
+   * ElevenLabs. Called from the session_started handler so the server
+   * has acknowledged the session before it receives our config.
+   *
+   * Best-effort: if the WS isn't open or the send throws, log and move
+   * on — the session is still usable, just without biasing, which
+   * silently degrades to base-model accuracy rather than breaking.
+   */
+  private sendSessionConfig(): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('[STT] Cannot send session config — WS not open (readyState:', this.ws?.readyState, ')');
+      return;
+    }
+    if (this.keyterms.length === 0) {
+      console.log('[STT] No keyterms to send');
+      return;
+    }
+    try {
+      this.ws.send(
+        JSON.stringify({
+          message_type: 'session_config',
+          keywords: this.keyterms,
+        })
+      );
+      console.log('[STT] Sent session_config with', this.keyterms.length, 'keyterms');
+    } catch (e) {
+      console.error('[STT] Failed to send session_config:', e);
+    }
   }
 
   private setState(state: ConnectionState) {
@@ -267,24 +298,9 @@ export class ElevenLabsSTTService {
         this.setState('connected');
         await RateLimiter.onSessionStart();
 
-        // Session config (model_id/language_code/sample_rate) is set via URL
-        // query params in sttProxy.ts. The init message below adds keyword
-        // biasing, which Scribe v2 Realtime accepts as a "session_config"
-        // message type. The field name `keywords` matches the Scribe v2
-        // HTTP API; if the server ignores it we fall through silently.
-        if (this.keyterms.length > 0) {
-          try {
-            this.ws?.send(
-              JSON.stringify({
-                message_type: 'session_config',
-                keywords: this.keyterms,
-              })
-            );
-            console.log('[STT] Sent', this.keyterms.length, 'keyterms');
-          } catch (e) {
-            console.warn('[STT] Failed to send keyterms:', e);
-          }
-        }
+        // Keyterm biasing is now sent in response to `session_started`
+        // (see handleMessage), not here. Sending before the server
+        // acknowledges the session can be silently dropped.
 
         // Enforce max session duration
         this.sessionTimeout = setTimeout(() => {
@@ -337,6 +353,10 @@ export class ElevenLabsSTTService {
     switch (data.message_type) {
       case 'session_started':
         console.log('[STT] Session started, session_id:', data.session_id);
+        // Now that ElevenLabs has acknowledged the session, send the
+        // keyterm biasing config. Sending before session_started can be
+        // silently dropped by the server.
+        this.sendSessionConfig();
         break;
       case 'partial_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
