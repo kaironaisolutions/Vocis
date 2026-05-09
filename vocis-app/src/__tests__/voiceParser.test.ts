@@ -457,3 +457,88 @@ describe('ITEM NAME BUG — extraction must preserve brand and garment words', (
     expect(r.price).toBe(25);
   });
 });
+
+// ── COLLISION: decade words ("nineties") must not bleed into price ──────────
+//
+// Risk: "nineties" contains "ninety" which is also a price number-word.
+// Our parser claims decade tokens before price detection runs, so the
+// consumed set guards against this. These tests pin that behaviour down.
+
+describe('COLLISION: decade words must not match price', () => {
+  it('nineties → decade only, price null', () => {
+    const r = parseTranscript('nineties');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBeNull();
+  });
+
+  it('eighties → decade only, price null', () => {
+    const r = parseTranscript('eighties');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBeNull();
+  });
+
+  it('seventies → decade only, price null', () => {
+    const r = parseTranscript('seventies');
+    expect(r.decade).toBe("70's");
+    expect(r.price).toBeNull();
+  });
+
+  it('sixties → decade only, price null', () => {
+    const r = parseTranscript('sixties');
+    expect(r.decade).toBe("60's");
+    expect(r.price).toBeNull();
+  });
+
+  it('nineties jacket → decade + item, no price', () => {
+    const r = parseTranscript('nineties jacket');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBeNull();
+    expect(r.item_name?.toLowerCase()).toContain('jacket');
+  });
+
+  it('ninety dollars → price only, no decade', () => {
+    const r = parseTranscript('ninety dollars');
+    expect(r.price).toBe(90);
+    expect(r.decade).toBeNull();
+  });
+
+  it('nineties jacket ninety dollars → all separate', () => {
+    const r = parseTranscript('nineties jacket ninety dollars');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(90);
+    expect(r.item_name?.toLowerCase()).toContain('jacket');
+  });
+
+  it('eighties bomber eighty dollars → all separate', () => {
+    const r = parseTranscript('eighties bomber eighty dollars');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBe(80);
+    expect(r.item_name?.toLowerCase()).toContain('bomber');
+  });
+});
+
+describe('ITEM NAME: extracted from any position', () => {
+  it('item name first', () => {
+    const r = parseTranscript('Carhartt jacket large eighties forty five dollars');
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+    expect(r.size).toBe('L');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBe(45);
+  });
+
+  it('item name last', () => {
+    const r = parseTranscript('large eighties forty five dollars Carhartt jacket');
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+    expect(r.size).toBe('L');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBe(45);
+  });
+
+  it('item name middle', () => {
+    const r = parseTranscript('large Carhartt jacket eighties forty five dollars');
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+    expect(r.size).toBe('L');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBe(45);
+  });
+});

@@ -321,6 +321,13 @@ const MAX_TRANSCRIPT_LENGTH = 1000;
  *
  * Missing fields come back as `null`. Use {@link mergeItems} to combine
  * multiple parses across utterances.
+ *
+ * Operation order (this is what makes "nineties" stay a decade rather than
+ * leaking into price):
+ *   1. SIZE detected and the matched words added to a `consumed` set
+ *   2. DECADE detected, matched words added to `consumed`
+ *   3. PRICE detected, but only over words NOT in `consumed`
+ *   4. Item name = remaining unconsumed words minus filler words
  */
 export function parseTranscript(transcript: string): ParsedItem {
   const sanitized = transcript.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
@@ -348,6 +355,21 @@ export function parseTranscript(transcript: string): ParsedItem {
   }
 
   result.raw_transcript = cleaned;
+
+  // Step-by-step diagnostic so live runtime captures the same per-stage
+  // visibility the unit tests have. Disabled when running under Jest so
+  // test output stays clean.
+  if (typeof process === 'undefined' || process.env.JEST_WORKER_ID === undefined) {
+    console.log('[PARSER]', JSON.stringify({
+      input: cleaned,
+      size: result.size,
+      decade: result.decade,
+      price: result.price,
+      item_name: result.item_name,
+      confidence: result.confidence,
+    }));
+  }
+
   return result;
 }
 

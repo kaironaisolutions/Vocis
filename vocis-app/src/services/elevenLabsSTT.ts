@@ -344,7 +344,12 @@ export class ElevenLabsSTTService {
         break;
       case 'committed_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
-          console.log('[STT] Final transcript:', data.text);
+          // Loud, distinctive log so live testers can grep for the raw
+          // transcript and see exactly what ElevenLabs heard before any
+          // parsing or merging touches it.
+          console.log('═══════════════════════════════');
+          console.log('[RAW] ElevenLabs heard:', JSON.stringify(data.text));
+          console.log('═══════════════════════════════');
           this.callbacks.onTranscript({ type: 'final', text: data.text });
         }
         break;
