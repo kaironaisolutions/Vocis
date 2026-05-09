@@ -279,15 +279,17 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   // pollute the parser's item-name extraction.
   elevenLabsUrl.searchParams.set('no_verbatim', 'true');
 
-  console.log(
-    '[WS] Upstream URL params:',
-    `keyterms=${validKeyterms.length}, no_verbatim=true, model_id=${elevenLabsUrl.searchParams.get('model_id')}`
-  );
+  // Diagnostic: dump enough of the upstream URL to confirm keyterms
+  // are present (search for "keyterms=" in `wrangler tail` output).
+  // Truncated to 300 chars so the log stays readable.
+  const upstreamUrlString = elevenLabsUrl.toString();
+  console.log('[WS] Keyterms in URL:', validKeyterms.length, validKeyterms.slice(0, 5).join(','));
+  console.log('[WS] Upstream URL (first 300):', upstreamUrlString.slice(0, 300));
   console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
 
   let elevenLabsResp: Response;
   try {
-    elevenLabsResp = await fetch(elevenLabsUrl.toString(), {
+    elevenLabsResp = await fetch(upstreamUrlString, {
       headers: {
         'Upgrade': 'websocket',
         'Connection': 'Upgrade',
@@ -343,11 +345,19 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     try { upstream.close(1000, 'Client disconnected'); } catch { /* already closed */ }
   });
 
-  // ElevenLabs → app: forward transcript responses directly
+  // ElevenLabs → app: forward transcript responses directly.
+  // Log the *first* message in full so we can see whether ElevenLabs
+  // echoed the keyterms back in session_started.config (per docs).
+  let firstUpstreamMessage = true;
   upstream.addEventListener('message', (event: MessageEvent) => {
     try {
       if (typeof event.data === 'string') {
-        console.log('[WS] ElevenLabs →', event.data.slice(0, 120));
+        if (firstUpstreamMessage) {
+          firstUpstreamMessage = false;
+          console.log('[WS] ElevenLabs FIRST message (full):', event.data);
+        } else {
+          console.log('[WS] ElevenLabs →', event.data.slice(0, 120));
+        }
       }
       server.send(event.data);
     } catch {

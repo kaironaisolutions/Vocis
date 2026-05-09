@@ -319,14 +319,25 @@ export class ElevenLabsSTTService {
     // ElevenLabs Scribe v2 Realtime message types:
     // https://elevenlabs.io/docs/api-reference/speech-to-text/realtime
     switch (data.message_type) {
-      case 'session_started':
+      case 'session_started': {
         console.log('[STT] Session started, session_id:', data.session_id);
-        // Keyterm biasing is configured via repeated keyterms= URL
-        // query params on the upstream WebSocket (handled by the Worker
-        // in worker/src/index.ts, per the ElevenLabs Scribe v2 Realtime
-        // spec). The previous session_config message we sent here was
-        // silently ignored by the server — that approach is removed.
+        // Per the Scribe v2 Realtime docs, session_started should echo
+        // the session config (keyterms, no_verbatim, language, etc.)
+        // back to us. If keyterms are missing from the echo, biasing
+        // never reached ElevenLabs even though the URL had them.
+        const config = (data.config ?? {}) as Record<string, unknown>;
+        const echoedKeyterms = Array.isArray(config.keyterms)
+          ? (config.keyterms as unknown[]).length
+          : -1;
+        console.log('[STT] session_started config:', JSON.stringify(config));
+        console.log(
+          '[STT] keyterms echoed:',
+          echoedKeyterms,
+          'no_verbatim:',
+          config.no_verbatim
+        );
         break;
+      }
       case 'partial_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
           // Partial transcripts are display-only on the UI; we let
