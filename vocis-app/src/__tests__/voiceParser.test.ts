@@ -526,6 +526,7 @@ describe('isValidTranscript filter', () => {
     "'9", "'19", "'90",
     '9', '5', '0',                // 1-digit
     '1930', '1990', '2000', '12345',  // 4+ digit (years/runaway)
+    '60', '70', '80', '90',           // ambiguous decade-suffix bare numbers
     ',300', '1930.',
     'be', 'for', 'a', 'an', 'the', 'um', 'uh',
     '',
@@ -535,7 +536,9 @@ describe('isValidTranscript filter', () => {
   });
 
   // Inputs that must pass — including 2–3 digit bare numbers that
-  // ElevenLabs sends when it drops the "dollars" word.
+  // ElevenLabs sends when it drops the "dollars" word. 60/70/80/90 are
+  // intentionally excluded above because they're more often partial
+  // decade words than prices in real inventory.
   const VALID = [
     'Nike hoodie',
     'small',
@@ -546,7 +549,7 @@ describe('isValidTranscript filter', () => {
     'twenty five dollars',
     'Nike hoodie 25',
     'medium nineties Nike hoodie twenty five dollars',
-    '19', '25', '30', '45', '75', '90', '150', '300', '999',
+    '19', '25', '30', '45', '75', '150', '300', '999',
   ];
   test.each(VALID)('passes valid transcript "%s"', (input) => {
     expect(isValidTranscript(input)).toBe(true);
@@ -575,6 +578,148 @@ describe('price: years are never prices', () => {
   const years = ['1930', '1990', '2000', '1980'];
   test.each(years)('"%s" → price: null', (input) => {
     expect(parseTranscript(input).price).toBeNull();
+  });
+});
+
+// ── REAL INVENTORY DATA — 4,503 items across 65 restock sheets ─────────────
+
+function sim(...transcripts: string[]): ParsedItem {
+  let item: ParsedItem = { ...EMPTY_ITEM };
+  for (const t of transcripts) {
+    if (isValidTranscript(t)) {
+      item = mergeItems(item, parseTranscript(t));
+    }
+  }
+  return item;
+}
+
+describe('Real inventory items - single transcript', () => {
+  it('90s Polo Red Quilted Bomber 2XL $190', () => {
+    const r = parseTranscript('90s Polo Red Quilted Bomber 2XL $190');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(190);
+    expect(r.item_name?.toLowerCase()).toContain('polo');
+  });
+
+  it('80s Carhartt chore coat XL $180', () => {
+    const r = parseTranscript('80s Carhartt chore coat XL $180');
+    expect(r.decade).toBe("80's");
+    expect(r.price).toBe(180);
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+  });
+
+  it('70s Levi bell bottom jeans $70', () => {
+    const r = parseTranscript('70s Levi bell bottom jeans $70');
+    expect(r.decade).toBe("70's");
+    expect(r.price).toBe(70);
+  });
+
+  it('90s LL Bean windbreaker $80', () => {
+    const r = parseTranscript('90s LL Bean windbreaker $80');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(80);
+  });
+
+  it('Polo leather harrington XL $320', () => {
+    const r = parseTranscript('Polo leather harrington XL $320');
+    expect(r.price).toBe(320);
+    expect(r.item_name?.toLowerCase()).toContain('polo');
+  });
+});
+
+describe('Real inventory items - separate recordings', () => {
+  it('Carhartt jacket | large | 80s | $185', () => {
+    const item = sim('Carhartt jacket', 'large', '80s', '$185');
+    expect(item.item_name?.toLowerCase()).toContain('carhartt');
+    expect(item.size).toBe('L');
+    expect(item.decade).toBe("80's");
+    expect(item.price).toBe(185);
+  });
+
+  it('$45 | small | 90s | LL Bean flannel', () => {
+    const item = sim('$45', 'small', '90s', 'LL Bean flannel');
+    expect(item.price).toBe(45);
+    expect(item.size).toBe('S');
+    expect(item.decade).toBe("90's");
+  });
+
+  it('Woolrich flannel | $80 | medium | 90s', () => {
+    const item = sim('Woolrich flannel', '$80', 'medium', '90s');
+    expect(item.price).toBe(80);
+    expect(item.size).toBe('M');
+    expect(item.decade).toBe("90's");
+  });
+
+  it('90s | Polo leather harrington | XL | $320', () => {
+    const item = sim('90s', 'Polo leather harrington', 'XL', '$320');
+    expect(item.price).toBe(320);
+    expect(item.decade).toBe("90's");
+    expect(item.item_name?.toLowerCase()).toContain('polo');
+  });
+
+  it('$50 | Dickies carpenter pants | 34x30', () => {
+    const item = sim('$50', 'Dickies carpenter pants', '34x30');
+    expect(item.price).toBe(50);
+    expect(item.item_name?.toLowerCase()).toContain('dickies');
+  });
+});
+
+describe('Price preservation across all field orders (Carhartt jacket)', () => {
+  const orders: string[][] = [
+    ['Carhartt jacket', 'large', '80s', '$185'],
+    ['Carhartt jacket', 'large', '$185', '80s'],
+    ['Carhartt jacket', '80s', 'large', '$185'],
+    ['Carhartt jacket', '80s', '$185', 'large'],
+    ['Carhartt jacket', '$185', 'large', '80s'],
+    ['Carhartt jacket', '$185', '80s', 'large'],
+    ['large', 'Carhartt jacket', '80s', '$185'],
+    ['large', '80s', 'Carhartt jacket', '$185'],
+    ['large', '$185', 'Carhartt jacket', '80s'],
+    ['$185', 'Carhartt jacket', 'large', '80s'],
+    ['$185', 'large', 'Carhartt jacket', '80s'],
+    ['$185', '80s', 'large', 'Carhartt jacket'],
+  ];
+  test.each(orders)(
+    'order: %s | %s | %s | %s',
+    (a, b, c, d) => {
+      const item = sim(a, b, c, d);
+      expect(item.price).toBe(185);
+      expect(item.size).toBe('L');
+      expect(item.decade).toBe("80's");
+      expect(item.item_name?.toLowerCase()).toContain('carhartt');
+    }
+  );
+});
+
+describe('Price detection — every real inventory price point', () => {
+  const all: [string, number][] = [
+    ['$35', 35], ['$40', 40], ['$45', 45],
+    ['$50', 50], ['$55', 55], ['$60', 60],
+    ['$65', 65], ['$70', 70], ['$75', 75],
+    ['$80', 80], ['$85', 85], ['$90', 90],
+    ['$95', 95], ['$100', 100], ['$110', 110],
+    ['$125', 125], ['$135', 135], ['$140', 140],
+    ['$150', 150], ['$160', 160], ['$175', 175],
+    ['$180', 180], ['$185', 185], ['$190', 190],
+    ['$200', 200], ['$250', 250], ['$265', 265],
+    ['$320', 320],
+  ];
+  test.each(all)('%s → %d', (input, expected) => {
+    expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+describe('Decade-suffix numbers must produce decade, never price', () => {
+  const cases: [string, string][] = [
+    ["'90s", "90's"], ['90s', "90's"],
+    ["'80s", "80's"], ['80s', "80's"],
+    ["'70s", "70's"], ['70s', "70's"],
+    ["'60s", "60's"], ['60s', "60's"],
+  ];
+  test.each(cases)('"%s" → decade=%s, price null', (input, expectedDecade) => {
+    const r = parseTranscript(input);
+    expect(r.decade).toBe(expectedDecade);
+    expect(r.price).toBeNull();
   });
 });
 

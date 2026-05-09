@@ -70,11 +70,21 @@ export function isValidTranscript(text: string): boolean {
   // Leading comma/space + digits: ",300", " 300" — punctuation noise.
   if (/^[,\s]+\d+$/.test(t)) return false;
 
-  // Pure-digit fragments: 1-digit too short, 4+ digit too year-like.
-  // 2-3 digit bare numbers are plausibly real prices ("30", "75", "300")
-  // that Scribe returns when it drops the "dollars" word.
+  // Pure-digit fragments. The rules:
+  //   - 1-digit:  too short, always junk
+  //   - 4+ digit: years and runaway streaming fragments
+  //   - 60, 70, 80, 90: ambiguous between price and decade fragment
+  //     ("90s" without the 's'). Per real-inventory observations these
+  //     are more often partial decade words than prices, so we drop
+  //     them. Real prices come through as "$60" / "60 dollars" /
+  //     "sixty dollars" via Patterns A/B and the written-words list.
+  //   - Other 2-3 digit numbers (30, 35, 45, 100, 185, 320, …) ARE
+  //     plausibly real prices that Scribe returns when it drops the
+  //     "dollars" word.
   if (/^\d+$/.test(t)) {
     if (t.length < 2 || t.length > 3) return false;
+    const num = parseInt(t, 10);
+    if (num === 60 || num === 70 || num === 80 || num === 90) return false;
     return true;
   }
 

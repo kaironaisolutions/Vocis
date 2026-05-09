@@ -1,52 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { VOCIS_KEYTERMS } from '../constants/keyterms';
 
 const CUSTOM_KEYTERMS_KEY = 'vocis_custom_keyterms_v1';
 const MAX_CUSTOM_KEYTERMS = 100;
 const MAX_KEYTERM_LENGTH = 40;
 
-/**
- * Built-in vintage-clothing vocabulary biased into the STT model so it
- * doesn't mishear domain terms ("Champion", "Carhartt", "burgundy", etc.).
- *
- * The list is intentionally focused: ElevenLabs treats keyterms as soft
- * biasing, and a long generic list dilutes the signal. Only words that
- * resellers actually say into the mic should be here.
- */
-export const DEFAULT_KEYTERMS: readonly string[] = [
-  // Sizes
-  'XS', 'small', 'medium', 'large', 'XL', 'XXL', 'one size',
-  // Decades
-  'seventies', 'eighties', 'nineties', 'two thousands', 'Y2K',
-  // Common brands
-  'Levi', 'Levis', 'Wrangler', 'Lee', 'Dickies',
-  'Ralph Lauren', 'Polo', 'Tommy Hilfiger', 'Tommy', 'Calvin Klein',
-  'Nautica', 'Fila', 'Champion', 'Russell Athletic', 'Fruit of the Loom',
-  'Carhartt', 'Pendleton', 'Patagonia', 'North Face',
-  'Nike', 'Adidas', 'Reebok', 'Puma',
-  'Starter', 'Apex', 'Logo Athletic',
-  // Garments
-  'windbreaker', 'bomber', 'flannel', 'denim', 'corduroy',
-  'velour', 'velvet', 'knit', 'sweatshirt', 'hoodie',
-  'crewneck', 'quarter zip', 'turtleneck', 'mock neck', 'henley',
-  'graphic tee', 'band tee', 'vintage tee',
-  'blazer', 'sport coat', 'vest',
-  'trench coat', 'peacoat', 'overcoat',
-  'straight leg', 'bootcut', 'flare', 'wide leg',
-  'high waist', 'mom jeans', 'dad jeans',
-  'cargo pants', 'chinos', 'slacks',
-  'mini skirt', 'midi skirt', 'maxi skirt',
-  'slip dress', 'wrap dress', 'shift dress',
-  // Colors
-  'burgundy', 'maroon', 'olive', 'mustard', 'teal', 'coral',
-  'mauve', 'chartreuse', 'heather grey', 'heather gray', 'charcoal',
-  'cream', 'ecru', 'ivory', 'off white',
-  // Descriptors
-  'distressed', 'faded', 'washed', 'raw hem',
-  'embroidered', 'patchwork', 'plaid', 'striped',
-  'floral', 'paisley', 'geometric', 'abstract',
-  // Price words
-  'dollars', 'bucks',
-];
+// Re-export the canonical list from src/constants/keyterms.ts so this
+// module can stay focused on the AsyncStorage-backed user-extension API.
+export const DEFAULT_KEYTERMS = VOCIS_KEYTERMS;
 
 function sanitizeKeyterm(raw: string): string | null {
   const trimmed = raw.trim().replace(/[\x00-\x1F\x7F]/g, '');
