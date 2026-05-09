@@ -750,6 +750,22 @@ describe('Single-word filler/mishear words must not become item_name', () => {
 // Bugs reproduced from live console logs (commit ea32dd5 → fa3b341 era).
 // Each entry corresponds to a line we saw in real Scribe output that was
 // producing wrong fields.
+describe('Price preservation across repeated utterances', () => {
+  it('price survives 5 subsequent commits including a duplicate size', () => {
+    let item: ParsedItem = { ...EMPTY_ITEM };
+    item = mergeItems(item, parseTranscript('$185'));
+    expect(item.price).toBe(185);
+    item = mergeItems(item, parseTranscript('small'));
+    expect(item.price).toBe(185);
+    item = mergeItems(item, parseTranscript("'80s"));
+    expect(item.price).toBe(185);
+    item = mergeItems(item, parseTranscript('Carhartt jacket'));
+    expect(item.price).toBe(185);
+    item = mergeItems(item, parseTranscript('small'));
+    expect(item.price).toBe(185);
+  });
+});
+
 describe('Live-log regressions: garbage words must not bleed into item_name', () => {
   it('"I feel a small Nike hat" → size S, item Nike Hat (no "Feel")', () => {
     const r = parseTranscript('I feel a small Nike hat');
