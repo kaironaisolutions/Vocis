@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SecureStorage } from './secureStorage';
 import { STTProxy } from './sttProxy';
+import { isValidTranscript } from './voiceParser';
 
 const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
@@ -339,16 +340,23 @@ export class ElevenLabsSTTService {
         break;
       case 'partial_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
+          // Partial transcripts are display-only on the UI; we let
+          // them through so the user can see live feedback even when
+          // the words are still mid-formation.
           this.callbacks.onTranscript({ type: 'partial', text: data.text });
         }
         break;
       case 'committed_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {
-          // Loud, distinctive log so live testers can grep for the raw
-          // transcript and see exactly what ElevenLabs heard before any
-          // parsing or merging touches it.
           console.log('═══════════════════════════════');
           console.log('[RAW] ElevenLabs heard:', JSON.stringify(data.text));
+          // Drop streaming fragments ("'9", "90", "1930", ",300") before
+          // they touch parser state.
+          if (!isValidTranscript(data.text)) {
+            console.log('[FILTER] Skipped fragment:', JSON.stringify(data.text));
+            console.log('═══════════════════════════════');
+            break;
+          }
           console.log('═══════════════════════════════');
           this.callbacks.onTranscript({ type: 'final', text: data.text });
         }

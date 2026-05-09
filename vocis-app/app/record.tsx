@@ -22,7 +22,7 @@ import { useRecording } from '../src/hooks/useRecording';
 import { useSecurity } from '../src/context/SecurityContext';
 import { createSession, addItem } from '../src/db/database';
 import { InventoryItem } from '../src/types';
-import { parseTranscription, splitMultipleItems, mergeItems, ParsedItem } from '../src/services/voiceParser';
+import { parseTranscription, splitMultipleItems, mergeItems, isValidTranscript, ParsedItem } from '../src/services/voiceParser';
 import { validateItem, sanitizeField } from '../src/services/validation';
 import { confirmDestructive } from '../src/services/confirm';
 
@@ -309,8 +309,15 @@ export default function RecordScreen() {
         setLiveTranscript('');
         console.log('[MERGE] Final transcript:', transcript);
 
+        // Drop streaming fragments before they reach parser state.
+        if (!isValidTranscript(transcript)) {
+          console.log('[FILTER] Skipped fragment:', transcript);
+          return;
+        }
+
         const items = splitMultipleItems(transcript);
         for (const itemText of items) {
+          if (!isValidTranscript(itemText)) continue;
           const parsed = parseTranscription(itemText);
           if (parsed.price !== null) {
             confirmItem(parsed);

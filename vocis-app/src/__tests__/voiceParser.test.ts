@@ -5,6 +5,7 @@ import {
   parsePrice,
   parseSize,
   parseDecade,
+  isValidTranscript,
   ParsedItem,
 } from '../services/voiceParser';
 
@@ -514,6 +515,50 @@ describe('COLLISION: decade words must not match price', () => {
     expect(r.decade).toBe("80's");
     expect(r.price).toBe(80);
     expect(r.item_name?.toLowerCase()).toContain('bomber');
+  });
+});
+
+// ── isValidTranscript filter ────────────────────────────────────────────────
+
+describe('isValidTranscript filter', () => {
+  const FRAGMENTS = [
+    "'9", '9', '19', '193', '1930', '93', '00',
+    ',300', ' 300', '1930.', '93,',
+    'be', 'for', 'a', 'an', 'the', 'um', 'uh',
+    '',
+  ];
+  test.each(FRAGMENTS)('filters fragment "%s"', (input) => {
+    expect(isValidTranscript(input)).toBe(false);
+  });
+
+  const VALID = [
+    'Nike hoodie',
+    'small',
+    'nineties',
+    "'90s",
+    '$25',
+    '$300',
+    'twenty five dollars',
+    'Nike hoodie 25',
+    'medium nineties Nike hoodie twenty five dollars',
+  ];
+  test.each(VALID)('passes valid transcript "%s"', (input) => {
+    expect(isValidTranscript(input)).toBe(true);
+  });
+});
+
+describe('ElevenLabs abbreviation formats', () => {
+  const cases: [string, string][] = [
+    ["'90s", "90's"],
+    ["'80s", "80's"],
+    ["'70s", "70's"],
+    ['90s', "90's"],
+    ['80s', "80's"],
+    ['the 90s', "90's"],
+    ['from the 90s', "90's"],
+  ];
+  test.each(cases)('"%s" → decade: %s', (input, expected) => {
+    expect(parseTranscript(input).decade).toBe(expected);
   });
 });
 

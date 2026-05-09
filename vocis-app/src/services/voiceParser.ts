@@ -32,6 +32,55 @@ export const EMPTY_ITEM: ParsedItem = {
   confidence: 0,
 };
 
+// Single-word noise that shouldn't be treated as an item, price, or anything
+// else even though the parser otherwise produces a non-null result for it.
+const NOISE_WORDS = new Set([
+  'be', 'a', 'an', 'the', 'and', 'or', 'but',
+  'for', 'to', 'of', 'in', 'on', 'at', 'by',
+  'um', 'uh', 'oh', 'ah', 'hmm', 'mm',
+  'is', 'as', 'so', 'do', 'go', 'me',
+  'my', 'we', 'he', 'she', 'they', 'you', 'i',
+  'it', 'this', 'that',
+]);
+
+/**
+ * True when a transcript is substantive enough to parse.
+ *
+ * ElevenLabs Scribe v2 Realtime sometimes commits early-stage fragments as
+ * if they were full transcripts ("'9", "90", "193", "1930"). Fed to the
+ * parser they get classified as bogus prices/decades — a pure-numeric "1930"
+ * becomes price=1930, "'9" becomes item_name="'9".
+ *
+ * The right place to drop these is at the STT/WS boundary, before parser
+ * state is touched. The parser itself stays unchanged because legitimate
+ * inputs ("Nike hoodie 25", "small 2000s flag tee 45") rely on the same
+ * bare-numeric path that fragments abuse.
+ */
+export function isValidTranscript(text: string): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 2) return false;
+
+  // Pure-digit fragments: "9", "19", "193", "1930"
+  if (/^\d+$/.test(t)) return false;
+  // Apostrophe + digits: "'9", "'90", "'19" (incomplete decade words)
+  if (/^['`‘’]\d+$/.test(t)) return false;
+  // Leading comma/space + digits: ",300", " 300"
+  if (/^[,\s]+\d+$/.test(t)) return false;
+  // Numeric with trailing punctuation only: "1930.", "93,"
+  if (/^\d+[\s,.;!?]*$/.test(t)) return false;
+
+  // Single-word noise.
+  if (!t.includes(' ') && NOISE_WORDS.has(t.toLowerCase().replace(/[\s,.;!?]/g, ''))) {
+    return false;
+  }
+
+  // Must contain at least one letter or $ — otherwise it's pure punctuation.
+  if (!/[a-zA-Z$]/.test(t)) return false;
+
+  return true;
+}
+
 /**
  * Compute the per-item confidence score: 25 points for each non-null field.
  */
