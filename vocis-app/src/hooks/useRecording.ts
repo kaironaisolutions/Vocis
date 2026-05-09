@@ -9,6 +9,7 @@ import {
 import {
   parseTranscription,
   splitMultipleItems,
+  mergeItems,
   ParsedItem,
 } from '../services/voiceParser';
 import { KeytermsService } from '../services/keyterms';
@@ -91,7 +92,9 @@ export function useRecording(): UseRecordingResult {
       if (current) {
         const parsed = parseTranscription(current);
         if (parsed.confidence.size || parsed.confidence.decade) {
-          setPendingItem(parsed);
+          // Merge into the existing pending item so partial transcripts
+          // accumulate fields rather than overwriting prior detections.
+          setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
         }
       }
     } else if (event.type === 'final') {
@@ -118,8 +121,15 @@ export function useRecording(): UseRecordingResult {
         setConfirmedItems((prev) => [...prev, ...newConfirmed]);
       }
 
-      // Set pending to the last incomplete item (or null if all complete)
-      setPendingItem(lastIncomplete);
+      // Merge the incomplete fragment into any prior pending item so the
+      // user can build one item up across multiple utterances. If the
+      // current transcript fully completed all items (no lastIncomplete),
+      // we leave pendingItem alone — the price-bearing items already
+      // auto-confirmed and clearing pending here would discard any
+      // half-built next item.
+      if (lastIncomplete) {
+        setPendingItem((prev) => (prev ? mergeItems(prev, lastIncomplete!) : lastIncomplete));
+      }
     }
   }, []);
 

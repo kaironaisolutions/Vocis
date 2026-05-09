@@ -3,7 +3,29 @@ import {
   parseSize,
   parseDecade,
   parseTranscription,
+  mergeItems,
+  ParsedItem,
 } from '../services/voiceParser';
+
+// Helper for building a synthetic ParsedItem in the existing API shape.
+function makeItem(overrides: Partial<ParsedItem>): ParsedItem {
+  return {
+    size: '?',
+    decade: '?',
+    item_name: 'Unknown Item',
+    price: 0,
+    raw_title: '(?) ? Unknown Item',
+    raw_transcript: '',
+    confidence: {
+      size: false,
+      decade: false,
+      price: false,
+      item_name: false,
+    },
+    confidence_score: 0,
+    ...overrides,
+  };
+}
 
 describe('parsePrice', () => {
   it('parses numeric prices', () => {
@@ -257,5 +279,153 @@ describe('order-independent parsing', () => {
   it('confidence_score is below 50 when most fields are missing', () => {
     const partial = parseTranscription('vintage jacket');
     expect(partial.confidence_score).toBeLessThan(50);
+  });
+});
+
+describe('mergeItems', () => {
+  it('preserves item_name when new transcript has only size', () => {
+    const existing = makeItem({
+      item_name: 'Nike Hoodie',
+      raw_transcript: 'Nike hoodie',
+      confidence: { size: false, decade: false, price: false, item_name: true },
+      confidence_score: 25,
+    });
+    const incoming = makeItem({
+      size: 'S',
+      raw_transcript: 'small',
+      confidence: { size: true, decade: false, price: false, item_name: false },
+      confidence_score: 25,
+    });
+
+    const result = mergeItems(existing, incoming);
+
+    expect(result.size).toBe('S');
+    expect(result.item_name).toBe('Nike Hoodie');
+    expect(result.decade).toBe('?');
+    expect(result.price).toBe(0);
+    expect(result.confidence.size).toBe(true);
+    expect(result.confidence.item_name).toBe(true);
+  });
+
+  it('preserves item_name when new transcript has only decade', () => {
+    const existing = makeItem({
+      size: 'S',
+      item_name: 'Nike Hoodie',
+      raw_transcript: 'small Nike hoodie',
+      confidence: { size: true, decade: false, price: false, item_name: true },
+      confidence_score: 50,
+    });
+    const incoming = makeItem({
+      decade: "90's",
+      raw_transcript: 'nineties',
+      confidence: { size: false, decade: true, price: false, item_name: false },
+      confidence_score: 25,
+    });
+
+    const result = mergeItems(existing, incoming);
+
+    expect(result.size).toBe('S');
+    expect(result.decade).toBe("90's");
+    expect(result.item_name).toBe('Nike Hoodie');
+  });
+
+  it('preserves item_name when new transcript has only price', () => {
+    const existing = makeItem({
+      size: 'S',
+      decade: "90's",
+      item_name: 'Nike Hoodie',
+      raw_transcript: 'small nineties Nike hoodie',
+      confidence: { size: true, decade: true, price: false, item_name: true },
+      confidence_score: 75,
+    });
+    const incoming = makeItem({
+      price: 25,
+      raw_transcript: 'twenty five dollars',
+      confidence: { size: false, decade: false, price: true, item_name: false },
+      confidence_score: 25,
+    });
+
+    const result = mergeItems(existing, incoming);
+
+    expect(result.size).toBe('S');
+    expect(result.decade).toBe("90's");
+    expect(result.item_name).toBe('Nike Hoodie');
+    expect(result.price).toBe(25);
+    expect(result.confidence_score).toBe(100);
+  });
+
+  it('builds a complete item across 4 separate transcripts', () => {
+    let item: ParsedItem = makeItem({});
+
+    // 1. item name
+    item = mergeItems(item, parseTranscription('Nike windbreaker'));
+    expect(item.confidence.item_name).toBe(true);
+    expect(item.item_name.toLowerCase()).toContain('nike');
+    expect(item.confidence.size).toBe(false);
+
+    // 2. size
+    item = mergeItems(item, parseTranscription('large'));
+    expect(item.size).toBe('L');
+    expect(item.confidence.item_name).toBe(true);
+    expect(item.item_name.toLowerCase()).toContain('nike');
+
+    // 3. decade
+    item = mergeItems(item, parseTranscription('nineties'));
+    expect(item.decade).toBe("90's");
+    expect(item.size).toBe('L');
+    expect(item.item_name.toLowerCase()).toContain('nike');
+
+    // 4. price
+    item = mergeItems(item, parseTranscription('fifty dollars'));
+    expect(item.price).toBe(50);
+    expect(item.decade).toBe("90's");
+    expect(item.size).toBe('L');
+    expect(item.item_name.toLowerCase()).toContain('nike');
+    expect(item.confidence_score).toBe(100);
+  });
+
+  it('incoming item_name replaces existing when present', () => {
+    const existing = makeItem({
+      size: 'M',
+      item_name: 'Hoodie',
+      raw_transcript: 'medium hoodie',
+      confidence: { size: true, decade: false, price: false, item_name: true },
+      confidence_score: 50,
+    });
+    const incoming = makeItem({
+      item_name: 'Nike Zip Up Hoodie',
+      raw_transcript: 'Nike zip up hoodie',
+      confidence: { size: false, decade: false, price: false, item_name: true },
+      confidence_score: 25,
+    });
+
+    const result = mergeItems(existing, incoming);
+
+    expect(result.item_name).toBe('Nike Zip Up Hoodie');
+    expect(result.size).toBe('M');
+  });
+
+  it('low-confidence incoming does not overwrite a fully populated item', () => {
+    const existing = makeItem({
+      size: 'XL',
+      decade: "80's",
+      item_name: 'Carhartt Jacket',
+      price: 45,
+      raw_transcript: 'XL eighties Carhartt jacket forty five dollars',
+      confidence: { size: true, decade: true, price: true, item_name: true },
+      confidence_score: 100,
+    });
+    const incoming = makeItem({
+      raw_transcript: 'um',
+      // All confidence flags false → nothing should change.
+    });
+
+    const result = mergeItems(existing, incoming);
+
+    expect(result.size).toBe('XL');
+    expect(result.decade).toBe("80's");
+    expect(result.item_name).toBe('Carhartt Jacket');
+    expect(result.price).toBe(45);
+    expect(result.confidence_score).toBe(100);
   });
 });

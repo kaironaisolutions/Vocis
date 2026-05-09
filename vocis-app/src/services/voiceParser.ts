@@ -22,6 +22,52 @@ export function getConfidenceScore(item: ParsedItem): number {
   return item.confidence_score;
 }
 
+/**
+ * Merge two parsed items, keeping each field that the existing item already
+ * has unless the incoming transcript actually detected a new value for it.
+ *
+ * The decision is driven by the per-field confidence flags — not by checking
+ * for the placeholder values ('?', 'Unknown Item', 0) — so we never overwrite
+ * a real "Nike hoodie" with the placeholder "Unknown Item" coming back from
+ * a follow-up utterance like "small".
+ *
+ * raw_transcript always reflects the most recent transcript, so the
+ * "what was heard" reveal shows the latest words the user spoke.
+ */
+export function mergeItems(existing: ParsedItem, incoming: ParsedItem): ParsedItem {
+  const size = incoming.confidence.size ? incoming.size : existing.size;
+  const decade = incoming.confidence.decade ? incoming.decade : existing.decade;
+  const price = incoming.confidence.price ? incoming.price : existing.price;
+  const item_name = incoming.confidence.item_name ? incoming.item_name : existing.item_name;
+
+  const confidence = {
+    size: existing.confidence.size || incoming.confidence.size,
+    decade: existing.confidence.decade || incoming.confidence.decade,
+    price: existing.confidence.price || incoming.confidence.price,
+    item_name: existing.confidence.item_name || incoming.confidence.item_name,
+  };
+
+  const confidence_score =
+    (confidence.size ? 25 : 0) +
+    (confidence.decade ? 25 : 0) +
+    (confidence.price ? 25 : 0) +
+    (confidence.item_name ? 25 : 0);
+
+  const sizeDisplay = confidence.size ? size : '?';
+  const decadeDisplay = confidence.decade ? decade : '?';
+
+  return {
+    size: sizeDisplay,
+    decade: decadeDisplay,
+    item_name,
+    price,
+    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${item_name}`,
+    raw_transcript: incoming.raw_transcript || existing.raw_transcript,
+    confidence,
+    confidence_score,
+  };
+}
+
 // Word-to-number mapping for spoken prices
 const WORD_NUMBERS: Record<string, number> = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,

@@ -22,8 +22,9 @@ import { useRecording } from '../src/hooks/useRecording';
 import { useSecurity } from '../src/context/SecurityContext';
 import { createSession, addItem } from '../src/db/database';
 import { InventoryItem } from '../src/types';
-import { parseTranscription, splitMultipleItems, ParsedItem } from '../src/services/voiceParser';
+import { parseTranscription, splitMultipleItems, mergeItems, ParsedItem } from '../src/services/voiceParser';
 import { validateItem, sanitizeField } from '../src/services/validation';
+import { confirmDestructive } from '../src/services/confirm';
 
 // --- Rate limits for recording sessions ---
 const MAX_ITEMS_PER_SESSION = 200;
@@ -312,13 +313,14 @@ export default function RecordScreen() {
         // Interim — visual feedback only, no saving
         setLiveTranscript(transcript);
 
-        // Show preview of what's being parsed
+        // Show preview of what's being parsed. Merge into the existing
+        // pending item so previously detected fields aren't clobbered.
         const items = splitMultipleItems(transcript);
         const currentItem = items[items.length - 1] || '';
         if (currentItem) {
           const parsed = parseTranscription(currentItem);
           if (parsed.confidence.size || parsed.confidence.decade) {
-            setPendingItem(parsed);
+            setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
           }
         }
       }
@@ -360,28 +362,41 @@ export default function RecordScreen() {
 
   // --- Handle a parsed item ---
   function handleParsedItem(parsed: ParsedItem) {
-    // If there's already a pending complete item, confirm it immediately
-    // before showing the new one (rapid-fire mode)
-    if (pendingItem && pendingItem.confidence.size && pendingItem.confidence.price) {
-      confirmItem(pendingItem);
+    // If the previous pending item is already a complete entry (size + price),
+    // confirm it before merging in the new transcript — that previous entry
+    // is "done" and the new transcript begins the next item.
+    const previousIsComplete =
+      pendingItem &&
+      pendingItem.confidence.size &&
+      pendingItem.confidence.price;
+
+    if (previousIsComplete) {
+      confirmItem(pendingItem!);
     }
 
-    // Cancel any existing auto-confirm timer
     if (autoConfirmTimer.current) {
       clearTimeout(autoConfirmTimer.current);
       autoConfirmTimer.current = null;
     }
 
-    // Check if this looks like a complete item (has at least size or decade + price)
-    const hasEnoughFields =
-      (parsed.confidence.size || parsed.confidence.decade) && parsed.confidence.price;
+    // Merge into the prior pending item (unless that prior item was just
+    // confirmed and is conceptually done) so partial transcripts accumulate.
+    const merged =
+      pendingItem && !previousIsComplete
+        ? mergeItems(pendingItem, parsed)
+        : parsed;
 
-    setPendingItem(parsed);
+    setPendingItem(merged);
+
+    const hasEnoughFields =
+      (merged.confidence.size || merged.confidence.decade) && merged.confidence.price;
 
     if (hasEnoughFields) {
-      // Auto-confirm after delay (user can tap to confirm/edit sooner)
+      // Auto-confirm after delay (user can tap to confirm/edit sooner).
+      // Use the merged item so we save the assembled fields, not just the
+      // last fragment.
       autoConfirmTimer.current = setTimeout(() => {
-        confirmItem(parsed);
+        confirmItem(merged);
       }, AUTO_CONFIRM_DELAY_MS);
     }
   }
@@ -449,6 +464,19 @@ export default function RecordScreen() {
     setPendingItem(null);
     setLiveTranscript('');
     if (Platform.OS !== 'web') nativeRecording.clearPendingItem();
+  }
+
+  // Clear is a confirmed reset — discardPending without the prompt is used
+  // internally (after save, on Try Again, etc.). The Clear affordance lets
+  // the user reset accumulated fields when partial transcripts have built
+  // up something they don't want to confirm.
+  function handleClear() {
+    confirmDestructive(
+      'Clear Fields',
+      'Start over with empty fields?',
+      'Clear',
+      () => discardPending()
+    );
   }
 
   async function handleDone() {
@@ -590,9 +618,17 @@ export default function RecordScreen() {
         <View style={styles.previewSection}>
           <View style={styles.previewHeader}>
             <Text style={styles.previewLabel}>PREVIEW</Text>
-            {pendingItem.confidence.size && pendingItem.confidence.price && (
-              <Text style={styles.autoConfirmHint}>Auto-confirming...</Text>
-            )}
+            <View style={styles.previewHeaderRight}>
+              {pendingItem.confidence.size && pendingItem.confidence.price && (
+                <Text style={styles.autoConfirmHint}>Auto-confirming...</Text>
+              )}
+              <TouchableOpacity
+                onPress={handleClear}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Text style={styles.clearButtonText}>Clear</Text>
+              </TouchableOpacity>
+            </View>
           </View>
           {pendingItem.confidence_score < 50 && (
             <View style={styles.lowConfidenceWarning}>
@@ -810,6 +846,17 @@ const styles = StyleSheet.create({
   autoConfirmHint: {
     ...Typography.bodySmall,
     color: Colors.accent,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  previewHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  clearButtonText: {
+    ...Typography.bodySmall,
+    color: Colors.textMuted,
     fontSize: 12,
     fontWeight: '600',
   },

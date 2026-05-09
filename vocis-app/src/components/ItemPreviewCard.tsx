@@ -64,10 +64,23 @@ export function ItemPreviewCard({
     onCancel?.();
   }
 
-  function renderField(label: string, field: keyof InventoryItem, value: string) {
+  function renderField(
+    label: string,
+    field: keyof InventoryItem,
+    value: string,
+    filled: boolean
+  ) {
     return (
       <View style={styles.field}>
-        <Text style={styles.label}>{label}</Text>
+        <View style={styles.labelRow}>
+          <View
+            style={[
+              styles.fieldIndicator,
+              filled ? styles.fieldFilled : styles.fieldEmpty,
+            ]}
+          />
+          <Text style={styles.label}>{label}</Text>
+        </View>
         {isEditing ? (
           <TextInput
             style={styles.editableValue}
@@ -78,12 +91,22 @@ export function ItemPreviewCard({
           />
         ) : (
           <TouchableOpacity onPress={() => setIsEditing(true)}>
-            <Text style={styles.value}>{value}</Text>
+            <Text style={[styles.value, !filled && styles.fieldMissing]}>
+              {filled ? value : '—'}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
     );
   }
+
+  // A field is "filled" when it carries real data, not the parser's
+  // placeholder. Size/decade use '?'; item_name uses 'Unknown Item';
+  // price defaults to 0.
+  const sizeFilled = !!draft.size && draft.size !== '?';
+  const decadeFilled = !!draft.decade && draft.decade !== '?';
+  const nameFilled = !!draft.item_name && draft.item_name !== 'Unknown Item';
+  const priceFilled = draft.price > 0;
 
   return (
     <Card style={styles.container}>
@@ -102,11 +125,19 @@ export function ItemPreviewCard({
       </View>
 
       <View style={styles.fields}>
-        {renderField('Size', 'size', draft.size)}
-        {renderField('Decade', 'decade', draft.decade)}
-        {renderField('Item', 'item_name', draft.item_name)}
+        {renderField('Size', 'size', draft.size, sizeFilled)}
+        {renderField('Decade', 'decade', draft.decade, decadeFilled)}
+        {renderField('Item', 'item_name', draft.item_name, nameFilled)}
         <View style={styles.field}>
-          <Text style={styles.label}>Price</Text>
+          <View style={styles.labelRow}>
+            <View
+              style={[
+                styles.fieldIndicator,
+                priceFilled ? styles.fieldFilled : styles.fieldEmpty,
+              ]}
+            />
+            <Text style={styles.label}>Price</Text>
+          </View>
           {isEditing ? (
             <TextInput
               style={[styles.editableValue, styles.priceInput]}
@@ -118,7 +149,9 @@ export function ItemPreviewCard({
             />
           ) : (
             <TouchableOpacity onPress={() => setIsEditing(true)}>
-              <Text style={styles.priceText}>${draft.price.toFixed(2)}</Text>
+              <Text style={[styles.priceText, !priceFilled && styles.fieldMissing]}>
+                {priceFilled ? `$${draft.price.toFixed(2)}` : '—'}
+              </Text>
             </TouchableOpacity>
           )}
         </View>
@@ -260,6 +293,27 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontWeight: '600',
     fontSize: 14,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.xs,
+  },
+  fieldIndicator: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: Spacing.xs + 2,
+  },
+  fieldFilled: {
+    backgroundColor: Colors.success,
+  },
+  fieldEmpty: {
+    backgroundColor: Colors.border,
+  },
+  fieldMissing: {
+    color: Colors.textMuted,
+    fontStyle: 'italic',
   },
   rawSection: {
     marginTop: Spacing.md,
