@@ -521,9 +521,12 @@ describe('COLLISION: decade words must not match price', () => {
 // ── isValidTranscript filter ────────────────────────────────────────────────
 
 describe('isValidTranscript filter', () => {
+  // Junk fragments — must not reach the parser.
   const FRAGMENTS = [
-    "'9", '9', '19', '193', '1930', '93', '00',
-    ',300', ' 300', '1930.', '93,',
+    "'9", "'19", "'90",
+    '9', '5', '0',                // 1-digit
+    '1930', '1990', '2000', '12345',  // 4+ digit (years/runaway)
+    ',300', '1930.',
     'be', 'for', 'a', 'an', 'the', 'um', 'uh',
     '',
   ];
@@ -531,6 +534,8 @@ describe('isValidTranscript filter', () => {
     expect(isValidTranscript(input)).toBe(false);
   });
 
+  // Inputs that must pass — including 2–3 digit bare numbers that
+  // ElevenLabs sends when it drops the "dollars" word.
   const VALID = [
     'Nike hoodie',
     'small',
@@ -541,9 +546,57 @@ describe('isValidTranscript filter', () => {
     'twenty five dollars',
     'Nike hoodie 25',
     'medium nineties Nike hoodie twenty five dollars',
+    '19', '25', '30', '45', '75', '90', '150', '300', '999',
   ];
   test.each(VALID)('passes valid transcript "%s"', (input) => {
     expect(isValidTranscript(input)).toBe(true);
+  });
+});
+
+// The user's bug: "thirty dollars" spoken, ElevenLabs commits "30".
+// We want price=30. Tests pin this behaviour for every 2-3 digit number
+// likely to come through as a stripped price.
+describe('price: ElevenLabs bare-number formats', () => {
+  const cases: [string, number][] = [
+    ['$25', 25], ['$75', 75], ['$300', 300], ['$80', 80],
+    ['25', 25], ['30', 30], ['45', 45], ['75', 75],
+    ['80', 80], ['90', 90], ['100', 100], ['150', 150],
+    ['300', 300], ['999', 999],
+  ];
+  test.each(cases)('"%s" → price: %d', (input, expected) => {
+    expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+// 4-digit numbers must never become prices — they're years or runaway
+// streaming fragments. Pattern C inside the parser also enforces this
+// as defense-in-depth.
+describe('price: years are never prices', () => {
+  const years = ['1930', '1990', '2000', '1980'];
+  test.each(years)('"%s" → price: null', (input) => {
+    expect(parseTranscript(input).price).toBeNull();
+  });
+});
+
+describe('price: combined with other fields', () => {
+  it("'90s $300 → decade and price", () => {
+    const r = parseTranscript("'90s $300");
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(300);
+  });
+
+  it('small Nike hat $80 → all fields', () => {
+    const r = parseTranscript('small Nike hat $80');
+    expect(r.size).toBe('S');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.price).toBe(80);
+  });
+
+  it('90s Nike hat 80 → decade + item + price', () => {
+    const r = parseTranscript('90s Nike hat 80');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.price).toBe(80);
   });
 });
 

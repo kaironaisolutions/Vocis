@@ -46,29 +46,45 @@ const NOISE_WORDS = new Set([
 /**
  * True when a transcript is substantive enough to parse.
  *
- * ElevenLabs Scribe v2 Realtime sometimes commits early-stage fragments as
- * if they were full transcripts ("'9", "90", "193", "1930"). Fed to the
- * parser they get classified as bogus prices/decades — a pure-numeric "1930"
- * becomes price=1930, "'9" becomes item_name="'9".
+ * ElevenLabs Scribe v2 Realtime emits two kinds of bare-number transcripts:
  *
- * The right place to drop these is at the STT/WS boundary, before parser
- * state is touched. The parser itself stays unchanged because legitimate
- * inputs ("Nike hoodie 25", "small 2000s flag tee 45") rely on the same
- * bare-numeric path that fragments abuse.
+ *   1. Streaming artifacts: "'9", "9", "1930" — partial words and years.
+ *      These corrupt parser state if let through (price=1930, item="'9").
+ *
+ *   2. Real prices with a dropped indicator: user says "thirty dollars",
+ *      Scribe commits just "30". We must let these through so the price
+ *      gets captured.
+ *
+ * Heuristic: 2–3 digit pure numbers are treated as legitimate prices.
+ * 1-digit and 4+ digit pure numbers are treated as junk. Apostrophe-prefixed
+ * digits and leading-comma digits are always junk. Pattern C in the parser
+ * applies the same 4-digit guard as defense-in-depth.
  */
 export function isValidTranscript(text: string): boolean {
   if (!text) return false;
   const t = text.trim();
   if (t.length < 2) return false;
 
-  // Pure-digit fragments: "9", "19", "193", "1930"
-  if (/^\d+$/.test(t)) return false;
-  // Apostrophe + digits: "'9", "'90", "'19" (incomplete decade words)
+  // Apostrophe-prefixed digit fragments: "'9", "'90", "'19" — partial decades.
   if (/^['`‘’]\d+$/.test(t)) return false;
-  // Leading comma/space + digits: ",300", " 300"
+  // Leading comma/space + digits: ",300", " 300" — punctuation noise.
   if (/^[,\s]+\d+$/.test(t)) return false;
-  // Numeric with trailing punctuation only: "1930.", "93,"
-  if (/^\d+[\s,.;!?]*$/.test(t)) return false;
+
+  // Pure-digit fragments: 1-digit too short, 4+ digit too year-like.
+  // 2-3 digit bare numbers are plausibly real prices ("30", "75", "300")
+  // that Scribe returns when it drops the "dollars" word.
+  if (/^\d+$/.test(t)) {
+    if (t.length < 2 || t.length > 3) return false;
+    return true;
+  }
+
+  // Numeric with trailing punctuation only: "1930.", "93," — apply the same
+  // length rule to the digit part.
+  const digitOnly = t.match(/^(\d+)[\s,.;!?]+$/);
+  if (digitOnly) {
+    const len = digitOnly[1].length;
+    return len >= 2 && len <= 3;
+  }
 
   // Single-word noise.
   if (!t.includes(' ') && NOISE_WORDS.has(t.toLowerCase().replace(/[\s,.;!?]/g, ''))) {
@@ -641,11 +657,15 @@ function detectPriceInWords(
     }
   }
 
-  // Pattern C: bare numeric token, optionally followed by "dollars"
+  // Pattern C: bare numeric token, optionally followed by "dollars".
+  // 4+ digit integers are rejected — they're almost always years
+  // ("1930", "2000") or runaway streaming fragments. Real 4-digit prices
+  // need to come in via Pattern A ("$1500") or Pattern B ("1500 dollars").
   for (let i = words.length - 1; i >= 0; i--) {
     if (consumed.has(i)) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
     if (!/^\d+(?:\.\d{1,2})?$/.test(cleaned)) continue;
+    if (/^\d{4,}$/.test(cleaned)) continue;
     const num = parseFloat(cleaned);
     if (num > 0) {
       let end = i;
