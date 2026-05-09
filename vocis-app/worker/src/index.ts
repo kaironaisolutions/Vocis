@@ -182,9 +182,29 @@ async function handleTokenRequest(
   env: Env,
   corsHeaders: Record<string, string>
 ): Promise<Response> {
-  const deviceId = request.headers.get('X-Device-ID');
+  // Accept deviceId from either the X-Device-ID header (native client
+  // pattern) OR the JSON body (web client pattern — browsers can't always
+  // attach custom headers to fetches that follow CORS preflights cleanly,
+  // and the app's web flow puts deviceId in the body).
+  let deviceId = request.headers.get('X-Device-ID');
+  if (!deviceId) {
+    try {
+      const body = (await request.clone().json()) as { deviceId?: unknown };
+      if (typeof body.deviceId === 'string') {
+        deviceId = body.deviceId;
+      }
+    } catch {
+      // Body was missing or not JSON — header was the only source, and it
+      // wasn't there either. Fall through to the missing-deviceId error.
+    }
+  }
+
   if (!deviceId || deviceId.length < 10 || deviceId.length > 128) {
-    return jsonResponse({ error: 'Missing or invalid X-Device-ID header.' }, 400, corsHeaders);
+    return jsonResponse(
+      { error: 'Missing deviceId. Provide via X-Device-ID header or JSON body { "deviceId": "..." }.' },
+      400,
+      corsHeaders
+    );
   }
 
   // Validate device ID format (alphanumeric + hyphens/underscores only — no dots, preserves token format)
