@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "secret:set": "wrangler secret put ELEVENLABS_API_KEY"
+    "dev": "wrangler dev --config wrangler.toml",
+    "deploy": "wrangler deploy --config wrangler.toml",
+    "secret:set": "wrangler secret put ELEVENLABS_API_KEY --config wrangler.toml"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260401.0",
