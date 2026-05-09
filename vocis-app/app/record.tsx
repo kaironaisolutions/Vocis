@@ -9,9 +9,11 @@ import {
   ScrollView,
   FlatList,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import Constants from 'expo-constants';
+import * as Haptics from 'expo-haptics';
 import { Colors, Typography, Spacing, BorderRadius, Shadows } from '../src/constants/theme';
 import { Button } from '../src/components/Button';
 import { ItemPreviewCard } from '../src/components/ItemPreviewCard';
@@ -34,6 +36,15 @@ interface LoggedItem {
   id: string;
 }
 
+const RECORDING_TIPS = [
+  'Speak clearly at a normal pace.',
+  'Hold the phone 6–12 inches from your mouth.',
+  'Say size, decade, item name, then price.',
+  'Example: "Medium, nineties, Polo bomber, $75".',
+  'Quiet rooms give better results.',
+  'Tap Stop when you finish — or pause and we\'ll do it for you.',
+];
+
 export default function RecordScreen() {
   const router = useRouter();
   const nativeRecording = useRecording();
@@ -46,6 +57,8 @@ export default function RecordScreen() {
   const [loggedItems, setLoggedItems] = useState<LoggedItem[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [tipDismissed, setTipDismissed] = useState(false);
+  const [tipIndex] = useState(() => Math.floor(Math.random() * RECORDING_TIPS.length));
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const recognitionRef = useRef<any>(null);
@@ -193,11 +206,45 @@ export default function RecordScreen() {
     return id;
   }
 
+  // --- Haptics: silent no-op on web; ignored on devices without a Taptic engine. ---
+  const haptic = useCallback(
+    (
+      kind:
+        | 'recordStart'
+        | 'recordStop'
+        | 'parseSuccess'
+        | 'parseError'
+    ) => {
+      if (Platform.OS === 'web') return;
+      try {
+        switch (kind) {
+          case 'recordStart':
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            break;
+          case 'recordStop':
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            break;
+          case 'parseSuccess':
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            break;
+          case 'parseError':
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+            break;
+        }
+      } catch {
+        // No-op on devices without haptics support.
+      }
+    },
+    []
+  );
+
   // --- Start/Stop ---
   async function handleStartStop() {
     if (recording) {
+      haptic('recordStop');
       stopListening();
     } else {
+      haptic('recordStart');
       await ensureSession();
       sessionStartTime.current = Date.now();
       if (Platform.OS === 'web') {
@@ -385,8 +432,10 @@ export default function RecordScreen() {
       setPendingItem(null);
       setLiveTranscript('');
       if (Platform.OS !== 'web') nativeRecording.clearPendingItem();
+      haptic('parseSuccess');
     } catch {
       setErrorMsg('Failed to save item.');
+      haptic('parseError');
     } finally {
       setSaving(false);
     }
@@ -414,6 +463,42 @@ export default function RecordScreen() {
   // --- Render ---
   const totalValue = loggedItems.reduce((sum, i) => sum + i.parsed.price, 0);
 
+  // Status label is derived from the native recording phase on iOS/Android,
+  // and from local listening flags on web.
+  let statusLabel: string;
+  if (Platform.OS === 'web') {
+    statusLabel = recording
+      ? pendingItem
+        ? 'Item detected'
+        : liveTranscript
+          ? 'Hearing you…'
+          : 'Listening…'
+      : loggedItems.length > 0
+        ? 'Session paused'
+        : 'Ready';
+  } else {
+    switch (nativeRecording.phase) {
+      case 'connecting':
+        statusLabel = 'Connecting…';
+        break;
+      case 'listening':
+        statusLabel = pendingItem
+          ? 'Item detected'
+          : liveTranscript
+            ? 'Hearing you…'
+            : 'Listening…';
+        break;
+      case 'transcribing':
+        statusLabel = 'Transcribing…';
+        break;
+      case 'error':
+        statusLabel = 'Recording error';
+        break;
+      default:
+        statusLabel = loggedItems.length > 0 ? 'Session paused' : 'Ready';
+    }
+  }
+
   return (
     <ScrollView
       ref={scrollRef}
@@ -424,22 +509,34 @@ export default function RecordScreen() {
       {/* Status bar */}
       <View style={styles.statusBar}>
         <View style={[styles.statusDot, recording && styles.statusDotActive]} />
-        <Text style={styles.statusText}>
-          {recording
-            ? pendingItem
-              ? 'Item detected'
-              : liveTranscript
-                ? 'Hearing you...'
-                : 'Listening...'
-            : loggedItems.length > 0
-              ? 'Session paused'
-              : 'Ready'}
-        </Text>
+        <Text style={styles.statusText}>{statusLabel}</Text>
         <Text style={styles.itemCount}>
           {loggedItems.length} {loggedItems.length === 1 ? 'item' : 'items'}
           {totalValue > 0 ? ` · $${totalValue.toFixed(0)}` : ''}
         </Text>
       </View>
+
+      {/* Transcribing overlay — shows after Stop while we wait for the
+          ElevenLabs transcript to come back. */}
+      {Platform.OS !== 'web' && nativeRecording.phase === 'transcribing' && (
+        <View style={styles.transcribingBanner}>
+          <ActivityIndicator size="small" color={Colors.accent} />
+          <Text style={styles.transcribingText}>Transcribing…</Text>
+        </View>
+      )}
+
+      {/* One-shot recording tip — shown only when the screen is idle. */}
+      {!recording &&
+        !pendingItem &&
+        loggedItems.length === 0 &&
+        !tipDismissed && (
+          <View style={styles.tipCard}>
+            <Text style={styles.tipText}>Tip: {RECORDING_TIPS[tipIndex]}</Text>
+            <TouchableOpacity onPress={() => setTipDismissed(true)}>
+              <Text style={styles.tipDismiss}>Got it</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
       {/* Mic button */}
       <View style={styles.micArea}>
@@ -513,7 +610,26 @@ export default function RecordScreen() {
             }}
             editable
             onCancel={discardPending}
+            rawTranscript={pendingItem.raw_transcript}
           />
+          {pendingItem.confidence_score < 50 && !recording && (
+            <View style={styles.retryRow}>
+              <TouchableOpacity
+                style={styles.retryButton}
+                onPress={async () => {
+                  haptic('recordStart');
+                  discardPending();
+                  if (Platform.OS === 'web') {
+                    startWebSpeech();
+                  } else {
+                    await nativeRecording.startRecording();
+                  }
+                }}
+              >
+                <Text style={styles.retryText}>Try Again</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           <View style={styles.previewActions}>
             <Button
               title="Discard"
@@ -707,6 +823,60 @@ const styles = StyleSheet.create({
     color: '#856404',
     fontSize: 12,
     textAlign: 'center',
+  },
+  transcribingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.sm,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.surfaceLight,
+    borderRadius: BorderRadius.sm,
+    marginBottom: Spacing.sm,
+  },
+  transcribingText: {
+    ...Typography.bodySmall,
+    color: Colors.accent,
+  },
+  tipCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Colors.surfaceLight,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  tipText: {
+    ...Typography.bodySmall,
+    flex: 1,
+  },
+  tipDismiss: {
+    ...Typography.bodySmall,
+    color: Colors.primaryLight,
+    fontWeight: '600',
+    marginLeft: Spacing.md,
+  },
+  retryRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+  },
+  retryButton: {
+    flex: 1,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.surfaceLight,
+    borderRadius: BorderRadius.sm,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  retryText: {
+    ...Typography.bodySmall,
+    fontWeight: '600',
   },
   previewActions: {
     flexDirection: 'row',

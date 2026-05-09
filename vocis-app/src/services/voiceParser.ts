@@ -6,6 +6,8 @@ export interface ParsedItem {
   item_name: string;
   price: number;
   raw_title: string;
+  /** The original transcript text we parsed — what the user actually said. */
+  raw_transcript: string;
   confidence: {
     size: boolean;
     decade: boolean;
@@ -162,12 +164,15 @@ export function parseTranscription(transcript: string): ParsedItem {
   if (cleaned.includes(',')) {
     const result = parseSegmented(cleaned);
     if (result.confidence.size || result.confidence.decade || result.confidence.price) {
+      result.raw_transcript = cleaned;
       return result;
     }
   }
 
   // Always try word-by-word parsing (handles natural speech)
-  return parseWordByWord(cleaned);
+  const result = parseWordByWord(cleaned);
+  result.raw_transcript = cleaned;
+  return result;
 }
 
 /**
@@ -424,6 +429,7 @@ function buildResult(
     item_name: name,
     price: priceValue,
     raw_title: `(${sizeDisplay}) ${decadeDisplay} ${name}`,
+    raw_transcript: '',
     confidence,
     confidence_score,
   };

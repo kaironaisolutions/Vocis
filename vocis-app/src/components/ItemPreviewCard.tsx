@@ -16,6 +16,8 @@ interface ItemPreviewCardProps {
   onSave?: (updated: InventoryItem) => void;
   onDelete?: () => void;
   onCancel?: () => void;
+  /** The original transcript heard by STT. Shown via a "what was heard" toggle. */
+  rawTranscript?: string;
 }
 
 export function ItemPreviewCard({
@@ -24,9 +26,11 @@ export function ItemPreviewCard({
   onSave,
   onDelete,
   onCancel,
+  rawTranscript,
 }: ItemPreviewCardProps) {
   const [isEditing, setIsEditing] = useState(editable);
   const [draft, setDraft] = useState(item);
+  const [showRaw, setShowRaw] = useState(false);
 
   useEffect(() => {
     setDraft(item);
@@ -119,6 +123,21 @@ export function ItemPreviewCard({
           )}
         </View>
       </View>
+
+      {/* Raw transcript reveal — lets the user check what was actually heard
+          without re-recording. */}
+      {rawTranscript ? (
+        <View style={styles.rawSection}>
+          <TouchableOpacity onPress={() => setShowRaw((s) => !s)}>
+            <Text style={styles.rawToggle}>
+              {showRaw ? 'Hide' : 'Show'} what was heard
+            </Text>
+          </TouchableOpacity>
+          {showRaw && (
+            <Text style={styles.rawTranscript}>"{rawTranscript}"</Text>
+          )}
+        </View>
+      ) : null}
 
       {/* Action buttons */}
       {(isEditing || onDelete) && (
@@ -241,5 +260,22 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontWeight: '600',
     fontSize: 14,
+  },
+  rawSection: {
+    marginTop: Spacing.md,
+    paddingTop: Spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
+  rawToggle: {
+    color: Colors.primaryLight,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  rawTranscript: {
+    fontStyle: 'italic',
+    fontSize: 12,
+    color: Colors.textSecondary,
+    marginTop: Spacing.xs,
   },
 });

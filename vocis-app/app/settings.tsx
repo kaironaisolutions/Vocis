@@ -8,6 +8,7 @@ import { SecureStorage } from '../src/services/secureStorage';
 import { AppSettingsService, AppSettings } from '../src/services/appSettings';
 import { deleteAllSessions, getSessions } from '../src/db/database';
 import { confirmDestructive } from '../src/services/confirm';
+import { KeytermsService } from '../src/services/keyterms';
 import * as LocalAuthentication from 'expo-local-authentication';
 
 export default function SettingsScreen() {
@@ -22,22 +23,48 @@ export default function SettingsScreen() {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [hasBiometrics, setHasBiometrics] = useState(false);
+  const [customKeyterms, setCustomKeyterms] = useState<string[]>([]);
+  const [keytermDraft, setKeytermDraft] = useState('');
 
   useEffect(() => {
     loadState();
   }, []);
 
   async function loadState() {
-    const [key, savedSettings, sessions, bioHardware] = await Promise.all([
+    const [key, savedSettings, sessions, bioHardware, terms] = await Promise.all([
       SecureStorage.getApiKey(),
       AppSettingsService.get(),
       getSessions(),
       LocalAuthentication.hasHardwareAsync(),
+      KeytermsService.getCustom(),
     ]);
     setHasApiKey(!!key);
     setSettings(savedSettings);
     setSessionCount(sessions.length);
     setHasBiometrics(bioHardware);
+    setCustomKeyterms(terms);
+  }
+
+  async function handleAddKeyterm() {
+    const trimmed = keytermDraft.trim();
+    if (!trimmed) return;
+    if (customKeyterms.length >= KeytermsService.MAX_CUSTOM_KEYTERMS) {
+      Alert.alert(
+        'Limit reached',
+        `Up to ${KeytermsService.MAX_CUSTOM_KEYTERMS} custom keyterms.`
+      );
+      return;
+    }
+    const next = [...customKeyterms, trimmed];
+    setCustomKeyterms(next);
+    setKeytermDraft('');
+    await KeytermsService.setCustom(next);
+  }
+
+  async function handleRemoveKeyterm(term: string) {
+    const next = customKeyterms.filter((t) => t !== term);
+    setCustomKeyterms(next);
+    await KeytermsService.setCustom(next);
   }
 
   async function handleToggleAutoPurge(value: boolean) {
@@ -195,6 +222,47 @@ export default function SettingsScreen() {
                 size="small"
               />
             </View>
+          </View>
+        )}
+      </Card>
+
+      {/* Voice keyterms — biases the speech recognizer toward your vocabulary. */}
+      <Card style={styles.section}>
+        <Text style={styles.sectionTitle}>Voice Keyterms</Text>
+        <Text style={[styles.sublabel, { marginBottom: Spacing.md }]}>
+          Add brand or item words you say often. Keyterms help the recognizer
+          understand your vocabulary. The default vintage list is always included.
+        </Text>
+
+        <View style={styles.keytermInputRow}>
+          <TextInput
+            style={styles.keytermInput}
+            value={keytermDraft}
+            onChangeText={setKeytermDraft}
+            placeholder="e.g. Stüssy"
+            placeholderTextColor={Colors.textMuted}
+            autoCorrect={false}
+            autoCapitalize="words"
+            maxLength={KeytermsService.MAX_KEYTERM_LENGTH}
+            returnKeyType="done"
+            onSubmitEditing={handleAddKeyterm}
+          />
+          <Button title="Add" onPress={handleAddKeyterm} variant="primary" size="small" />
+        </View>
+
+        {customKeyterms.length === 0 ? (
+          <Text style={styles.sublabel}>No custom keyterms yet.</Text>
+        ) : (
+          <View style={styles.keytermChips}>
+            {customKeyterms.map((term) => (
+              <TouchableOpacity
+                key={term}
+                style={styles.keytermChip}
+                onPress={() => handleRemoveKeyterm(term)}
+              >
+                <Text style={styles.keytermChipText}>{term} ×</Text>
+              </TouchableOpacity>
+            ))}
           </View>
         )}
       </Card>
@@ -388,5 +456,39 @@ const styles = StyleSheet.create({
   arrow: {
     color: Colors.textMuted,
     fontSize: 16,
+  },
+  keytermInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginBottom: Spacing.md,
+  },
+  keytermInput: {
+    flex: 1,
+    backgroundColor: Colors.surfaceLight,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm + 2,
+    color: Colors.text,
+    fontSize: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  keytermChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.xs,
+  },
+  keytermChip: {
+    backgroundColor: Colors.surfaceLight,
+    borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs + 2,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  keytermChipText: {
+    color: Colors.text,
+    fontSize: 13,
   },
 });

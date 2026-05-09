@@ -194,9 +194,19 @@ export class ElevenLabsSTTService {
   private callbacks: STTServiceCallbacks;
   private state: ConnectionState = 'disconnected';
   private sessionTimeout: ReturnType<typeof setTimeout> | null = null;
+  private keyterms: string[] = [];
 
   constructor(callbacks: STTServiceCallbacks) {
     this.callbacks = callbacks;
+  }
+
+  /**
+   * Provide a list of domain-specific terms to bias the model toward.
+   * Must be called before connect() — keyterms are sent right after the
+   * WebSocket opens.
+   */
+  setKeyterms(terms: string[]): void {
+    this.keyterms = terms.slice(0, 250);
   }
 
   private setState(state: ConnectionState) {
@@ -256,8 +266,24 @@ export class ElevenLabsSTTService {
         this.setState('connected');
         await RateLimiter.onSessionStart();
 
-        // No init message needed — Scribe v2 Realtime is configured via URL
-        // query params (model_id, language_code, sample_rate) set in sttProxy.ts.
+        // Session config (model_id/language_code/sample_rate) is set via URL
+        // query params in sttProxy.ts. The init message below adds keyword
+        // biasing, which Scribe v2 Realtime accepts as a "session_config"
+        // message type. The field name `keywords` matches the Scribe v2
+        // HTTP API; if the server ignores it we fall through silently.
+        if (this.keyterms.length > 0) {
+          try {
+            this.ws?.send(
+              JSON.stringify({
+                message_type: 'session_config',
+                keywords: this.keyterms,
+              })
+            );
+            console.log('[STT] Sent', this.keyterms.length, 'keyterms');
+          } catch (e) {
+            console.warn('[STT] Failed to send keyterms:', e);
+          }
+        }
 
         // Enforce max session duration
         this.sessionTimeout = setTimeout(() => {
