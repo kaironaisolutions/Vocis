@@ -447,6 +447,59 @@ describe('PRICE BUG — comma-formatted thousands', () => {
     expect(r.decade).toBe("90's");
     expect(r.item_name?.toLowerCase()).toContain('nike');
     expect(r.item_name?.toLowerCase()).not.toContain('000');
+    expect(r.item_name).not.toContain('00');
+  });
+});
+
+// ── DIGIT FRAGMENTS IN ITEM NAMES ───────────────────────────────────────────
+//
+// Bare digits and "0s" fragments slip into item_name when the parser can't
+// claim them as price (e.g. "0" is below the $1 price floor) or when a
+// malformed transcript like "$2,00" segments into "$2" + "00". buildResult
+// strips pure-digit/zero-suffix words from the remaining item name.
+
+describe('ITEM NAME — digit fragments must not leak into name', () => {
+  it('"0 small Nike shirt" → item name has no digit prefix', () => {
+    const r = parseTranscript('0 small Nike shirt');
+    expect(r.size).toBe('S');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name).not.toMatch(/^0/);
+  });
+
+  it('"Nike shirt 0s" → item name has no "0s" suffix', () => {
+    const r = parseTranscript('Nike shirt 0s');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name).not.toMatch(/0s/i);
+  });
+});
+
+// ── CONVERSATIONAL SPEECH FILTER ────────────────────────────────────────────
+//
+// When the user forgets to stop recording or talks to someone mid-session,
+// long stretches of plain English get committed. Long transcripts with no
+// inventory anchor word (size, decade, $, garment, brand) are rejected.
+
+describe('isValidTranscript — conversational speech rejected', () => {
+  it('long pure-English chatter rejected', () => {
+    expect(
+      isValidTranscript(
+        'and then it will log it and then he can keep going on'
+      )
+    ).toBe(false);
+  });
+
+  it('long anchored transcript still passes (size + decade + $ + brand)', () => {
+    expect(isValidTranscript('small 90s Nike hoodie $300')).toBe(true);
+  });
+
+  it('long anchored transcript with brand only passes', () => {
+    expect(
+      isValidTranscript('this is a really nice Carhartt jacket I think')
+    ).toBe(true);
+  });
+
+  it('short un-anchored transcripts still pass (≤6 words)', () => {
+    expect(isValidTranscript('and then he can keep')).toBe(true);
   });
 });
 

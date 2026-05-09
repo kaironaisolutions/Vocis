@@ -86,6 +86,11 @@ export function isValidTranscript(text: string): boolean {
   if (/^['`‘’]\d+$/.test(t)) return false;
   // Leading comma/space + digits: ",300", " 300" — punctuation noise.
   if (/^[,\s]+\d+$/.test(t)) return false;
+  // Zero variants with optional "s": "0", "0s", "00", "000s" — Scribe
+  // streaming artifacts left over from comma-formatted prices ("$2,000"
+  // mid-stream becomes "$2," then "0", "00", "000" — already covered for
+  // "00"/"000" below, plus "0s" which would otherwise slip through).
+  if (/^0+s?$/i.test(t)) return false;
 
   // Pure-digit fragments. The rules:
   //   - 1-digit:  too short, always junk
@@ -133,8 +138,31 @@ export function isValidTranscript(text: string): boolean {
   // Must contain at least one letter or $ — otherwise it's pure punctuation.
   if (!/[a-zA-Z$]/.test(t)) return false;
 
+  // Long transcripts with no inventory anchor — likely background chatter
+  // captured because the user forgot to stop recording or talked to someone
+  // mid-session. Real inventory utterances are short OR contain at least
+  // one of: a size word, decade indicator, dollar amount, garment, or known
+  // brand. The 7-word threshold leaves room for natural phrasing
+  // ("medium nineties Polo Ralph Lauren bomber seventy five dollars" = 9
+  // words but anchored on size/decade/brand) while filtering pure prose.
+  const wordCount = t.split(/\s+/).length;
+  if (wordCount > 6) {
+    const hasAnchor = ANCHOR_PATTERNS.some((p) => p.test(t));
+    if (!hasAnchor) return false;
+  }
+
   return true;
 }
+
+const ANCHOR_PATTERNS: RegExp[] = [
+  /\b(?:xs|s|m|l|xl|xxl|xxxl|2xl|small|medium|large)\b/i,
+  /\b(?:50s|60s|70s|80s|90s|2000s|fifties|sixties|seventies|eighties|nineties|y2k)\b/i,
+  /['‘’]\d{2}s\b/,
+  /\$\s*\d/,
+  /\b\d+\s+(?:dollars?|bucks?)\b/i,
+  /\b(?:jacket|coat|shirt|tee|t-shirt|jeans|pants|sweater|hoodie|hat|cap|beanie|vest|blazer|bomber|windbreaker|flannel|harrington|chore|cardigan|sweatshirt|trousers|shorts|skirt|dress|jumper|parka|anorak|trench|peacoat)\b/i,
+  /\b(?:carhartt|polo|nike|levi|levis|gap|wrangler|patagonia|woolrich|adidas|champion|dickies|stussy|supreme|tommy|hilfiger|nautica|ralph|lauren|gucci|prada|burberry)\b/i,
+];
 
 /**
  * Compute the per-item confidence score: 25 points for each non-null field.
@@ -826,7 +854,19 @@ function buildResult(
   // Without this, "Nike Hoodie. Twenty five dollars" leaves "Nike Hoodie."
   // as the item name, including the period.
   const trimmed = itemName.trim().replace(/^[\s,.;!?]+|[\s,.;!?]+$/g, '');
-  let item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
+
+  // Drop pure-digit and "0s"-style fragments that survived consumption.
+  // These slip through when malformed transcripts like "$2,00" split into
+  // "$2" + "00", or when bare digits ("0", "9") appear out of price context.
+  // Real garment names never contain these as standalone words.
+  const cleanedWords = trimmed.split(/\s+/).filter((w) => {
+    if (w === '') return false;
+    if (/^\d+s?$/i.test(w)) return false;
+    return true;
+  });
+  const rebuilt = cleanedWords.join(' ');
+
+  let item_name = rebuilt.length > 0 ? titleCase(rebuilt) : null;
 
   // Reject single-word item_names that are common filler / mishear
   // fragments. A real brand or garment name is almost always 2+ words
