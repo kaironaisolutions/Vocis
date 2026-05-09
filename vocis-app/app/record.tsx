@@ -67,6 +67,14 @@ export default function RecordScreen() {
   const sessionStartTime = useRef<number>(0);
   const recentItemTimestamps = useRef<number[]>([]);
   const scrollRef = useRef<ScrollView>(null);
+  // pendingItemRef mirrors pendingItem so long-lived event handlers
+  // (recognition.onresult is bound once, then keeps firing for the entire
+  // recording session) can read the LATEST pending state instead of the
+  // stale value captured in their closure.
+  const pendingItemRef = useRef<ParsedItem | null>(null);
+  useEffect(() => {
+    pendingItemRef.current = pendingItem;
+  }, [pendingItem]);
 
   // --- Pulse animation ---
   const recording = Platform.OS === 'web' ? isListening : nativeRecording.isRecording;
@@ -295,9 +303,11 @@ export default function RecordScreen() {
       const transcript = lastResult[0].transcript.trim();
 
       if (lastResult.isFinal) {
-        // Final result — split and save items
+        // Final result — split and save items. Do NOT clear pendingItem
+        // here: handleParsedItem merges incoming fields into whatever has
+        // been accumulated so far. Clearing first would defeat the merge.
         setLiveTranscript('');
-        setPendingItem(null);
+        console.log('[MERGE] Final transcript:', transcript);
 
         const items = splitMultipleItems(transcript);
         for (const itemText of items) {
@@ -362,16 +372,20 @@ export default function RecordScreen() {
 
   // --- Handle a parsed item ---
   function handleParsedItem(parsed: ParsedItem) {
-    // If the previous pending item is already a complete entry (size + price),
-    // confirm it before merging in the new transcript — that previous entry
-    // is "done" and the new transcript begins the next item.
+    // Read the LATEST pending item from the ref — NOT the closure-captured
+    // value. recognition.onresult is bound once at startWebSpeech() time and
+    // then keeps invoking handleParsedItem for the lifetime of the session,
+    // so any value read from this function's closure goes stale after the
+    // first state update.
+    const previous = pendingItemRef.current;
+
     const previousIsComplete =
-      pendingItem &&
-      pendingItem.confidence.size &&
-      pendingItem.confidence.price;
+      previous &&
+      previous.confidence.size &&
+      previous.confidence.price;
 
     if (previousIsComplete) {
-      confirmItem(pendingItem!);
+      confirmItem(previous!);
     }
 
     if (autoConfirmTimer.current) {
@@ -382,10 +396,32 @@ export default function RecordScreen() {
     // Merge into the prior pending item (unless that prior item was just
     // confirmed and is conceptually done) so partial transcripts accumulate.
     const merged =
-      pendingItem && !previousIsComplete
-        ? mergeItems(pendingItem, parsed)
-        : parsed;
+      previous && !previousIsComplete ? mergeItems(previous, parsed) : parsed;
 
+    console.log('[MERGE] Incoming parsed:', {
+      size: parsed.size,
+      decade: parsed.decade,
+      item_name: parsed.item_name,
+      price: parsed.price,
+    });
+    console.log('[MERGE] Previous state:', {
+      size: previous?.size,
+      decade: previous?.decade,
+      item_name: previous?.item_name,
+      price: previous?.price,
+    });
+    console.log('[MERGE] Result after merge:', {
+      size: merged.size,
+      decade: merged.decade,
+      item_name: merged.item_name,
+      price: merged.price,
+    });
+
+    // Keep the ref in sync immediately so any follow-up calls inside the
+    // same event handler (e.g. multiple items inside one final transcript)
+    // see the new merged value rather than waiting for the useEffect that
+    // syncs the ref from React state.
+    pendingItemRef.current = merged;
     setPendingItem(merged);
 
     const hasEnoughFields =
@@ -444,6 +480,7 @@ export default function RecordScreen() {
 
       recentItemTimestamps.current.push(Date.now());
       setLoggedItems((prev) => [...prev, { parsed: sanitized, id }]);
+      pendingItemRef.current = null;
       setPendingItem(null);
       setLiveTranscript('');
       if (Platform.OS !== 'web') nativeRecording.clearPendingItem();
@@ -461,6 +498,7 @@ export default function RecordScreen() {
       clearTimeout(autoConfirmTimer.current);
       autoConfirmTimer.current = null;
     }
+    pendingItemRef.current = null;
     setPendingItem(null);
     setLiveTranscript('');
     if (Platform.OS !== 'web') nativeRecording.clearPendingItem();

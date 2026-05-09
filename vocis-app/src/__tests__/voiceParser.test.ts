@@ -405,6 +405,17 @@ describe('mergeItems', () => {
     expect(result.size).toBe('M');
   });
 
+  it('nike hoodie then small - item name preserved (regression test)', () => {
+    let item = makeItem({});
+
+    item = mergeItems(item, parseTranscription('Nike hoodie'));
+    expect(item.item_name.toLowerCase()).toContain('nike');
+
+    item = mergeItems(item, parseTranscription('small'));
+    expect(item.size).toBe('S');
+    expect(item.item_name.toLowerCase()).toContain('nike');
+  });
+
   it('low-confidence incoming does not overwrite a fully populated item', () => {
     const existing = makeItem({
       size: 'XL',
