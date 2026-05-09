@@ -450,7 +450,16 @@ export function parseTranscript(transcript: string): ParsedItem {
     ? sanitized.slice(0, MAX_TRANSCRIPT_LENGTH)
     : sanitized;
 
-  const cleaned = truncated.replace(/\s+/g, ' ').trim();
+  // Strip commas inside numeric thousands groups: "$2,000" → "$2000",
+  // "1,500 dollars" → "1500 dollars". Without this, the comma triggers
+  // the segmented path below, which splits on commas and shatters the
+  // number into "$2" + "000".
+  const normalized = truncated.replace(
+    /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g,
+    (m) => m.replace(/,/g, '')
+  );
+
+  const cleaned = normalized.replace(/\s+/g, ' ').trim();
 
   if (cleaned === '') {
     return { ...EMPTY_ITEM, raw_transcript: '' };
@@ -618,8 +627,13 @@ function parseWordByWord(text: string): ParsedItem {
   // unsafe for multi-word slices because "nineties Nike windbreaker"
   // would match "nineties" and consume the brand words too). Single
   // words still go through parseDecade for its regex patterns.
+  //
+  // $-prefixed tokens are skipped: parseDecade's 4-digit year regex
+  // would otherwise match "$2000" as the decade "2000's", consuming
+  // the token before the price detector can claim it.
   for (let i = 0; i < words.length && decade === null; i++) {
     if (consumed.has(i)) continue;
+    if (words[i].startsWith('$')) continue;
     if (i + 2 < words.length && !consumed.has(i + 1) && !consumed.has(i + 2)) {
       const three = `${words[i]} ${words[i + 1]} ${words[i + 2]}`.toLowerCase();
       if (EXTENDED_DECADE_MAP[three]) {
@@ -695,16 +709,16 @@ function detectPriceInWords(
     }
   }
 
-  // Pattern B: $-prefixed token. Capped at $500 — anything above is
-  // almost always a streaming artifact ("$530", "$1500"). Real high-end
-  // vintage prices in the inventory top out at $320; the cap leaves some
-  // headroom but rejects clearly-out-of-range values.
+  // Pattern B: $-prefixed token. Capped at $9999 — the explicit "$" is
+  // a strong signal of a real price (Scribe rarely fabricates one), so
+  // we accept the full reseller range including comma-formatted prices
+  // like "$2,000" that the parseTranscript normalizer collapsed to "$2000".
   for (let i = 0; i < words.length; i++) {
     if (consumed.has(i)) continue;
     if (!words[i].startsWith('$')) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
     const num = parseFloat(cleaned);
-    if (!isNaN(num) && num >= 1 && num <= 500) {
+    if (!isNaN(num) && num >= 1 && num <= 9999) {
       return { value: num, start: i, end: i };
     }
   }

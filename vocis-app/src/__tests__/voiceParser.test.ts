@@ -420,6 +420,36 @@ describe('PRICE BUG — must all return correct price', () => {
   });
 });
 
+// ── COMMA-FORMATTED PRICES ──────────────────────────────────────────────────
+//
+// ElevenLabs Scribe v2 returns prices with thousands separators ("$2,000",
+// "$1,500"). The comma used to trigger the segmented-parse path, which split
+// "$2,000" into "$2" and "000" — yielding price=2, item_name="000".
+// parseTranscript now normalizes "$2,000" → "$2000" before routing.
+
+describe('PRICE BUG — comma-formatted thousands', () => {
+  it('"$2,000" → 2000', () => {
+    expect(parseTranscript('$2,000').price).toBe(2000);
+  });
+
+  it('"$1,500" → 1500', () => {
+    expect(parseTranscript('$1,500').price).toBe(1500);
+  });
+
+  it('"$1,000" → 1000', () => {
+    expect(parseTranscript('$1,000').price).toBe(1000);
+  });
+
+  it('"large 90s Nike hat $2,000" → price 2000, item contains nike, no "000" artifact', () => {
+    const r = parseTranscript("large '90s Nike hat $2,000");
+    expect(r.price).toBe(2000);
+    expect(r.size).toBe('L');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).not.toContain('000');
+  });
+});
+
 describe('ITEM NAME BUG — extraction must preserve brand and garment words', () => {
   it('Nike hoodie extracted correctly', () => {
     const r = parseTranscript('Nike hoodie');
@@ -573,13 +603,27 @@ describe('price: ElevenLabs bare-number formats', () => {
   });
 });
 
-describe('price: out-of-range values are rejected', () => {
-  const rejected: string[] = [
-    '$530', '$999', '$1000',  // explicit-dollar above $500 cap
-    '999', '530',              // bare numbers above $500 cap
-  ];
+// Bare numbers above $500 are still rejected (Pattern C cap stands —
+// these are usually streaming artifacts when the user didn't say "$").
+// Explicit "$"-prefixed values up to $9999 are trusted now (Pattern B
+// raised so real reseller prices like "$2,000" parse correctly).
+describe('price: bare numbers above $500 are rejected', () => {
+  const rejected: string[] = ['999', '530'];
   test.each(rejected)('"%s" → price: null', (input) => {
     expect(parseTranscript(input).price).toBeNull();
+  });
+});
+
+describe('price: explicit $-prefix accepted up to $9999', () => {
+  const cases: [string, number][] = [
+    ['$530', 530],
+    ['$999', 999],
+    ['$1000', 1000],
+    ['$2500', 2500],
+    ['$9999', 9999],
+  ];
+  test.each(cases)('"%s" → price: %d', (input, expected) => {
+    expect(parseTranscript(input).price).toBe(expected);
   });
 });
 
