@@ -41,6 +41,23 @@ const NOISE_WORDS = new Set([
   'is', 'as', 'so', 'do', 'go', 'me',
   'my', 'we', 'he', 'she', 'they', 'you', 'i',
   'it', 'this', 'that',
+  // Price-context words that arrive standalone as fragments.
+  'dollars', 'dollar', 'bucks', 'buck', 'usd',
+  // Generic glue words and Scribe mishears commonly seen alone.
+  'with', 'plus', 'add', 'feel',
+]);
+
+// Two-word filler phrases that arrive as committed transcripts on their
+// own ("with dollars", "i feel", "my dream"). Treated as junk at the WS
+// boundary so they never reach parser state.
+const FILLER_PHRASES = new Set([
+  'i feel', 'i feel a',
+  'my dream', 'my feelings',
+  'we got', 'i forgot', 'for the',
+  'with dollars', 'for dollars',
+  'like a', 'you know',
+  'i mean', 'i think',
+  'kind of', 'sort of',
 ]);
 
 /**
@@ -104,6 +121,12 @@ export function isValidTranscript(text: string): boolean {
 
   // Single-word noise.
   if (!t.includes(' ') && NOISE_WORDS.has(t.toLowerCase().replace(/[\s,.;!?]/g, ''))) {
+    return false;
+  }
+
+  // Common short filler phrases — the user wouldn't be inventorying these,
+  // and Scribe occasionally commits them as standalone transcripts.
+  if (FILLER_PHRASES.has(t.toLowerCase().replace(/[.,;!?]/g, '').trim())) {
     return false;
   }
 
@@ -381,6 +404,16 @@ const FILLER_WORDS = new Set([
   'kind', 'sort',
   'in', 'on',
   'about',
+  // Verbs / adjectives that creep into transcripts but aren't garment words
+  'feel', 'felt', 'add', 'plus',
+  // Scribe mishears that show up appended to legitimate item names
+  // ("Nike Hat videos", "Nike Hat babies").
+  'video', 'videos', 'song', 'songs',
+  'dream', 'dreams', 'babies', 'ladies',
+  // Price-context words that bleed into the item phrase when the price
+  // detector consumes only the number ("90 dollars" → consumed: 90 →
+  // remaining: "dollars" → would otherwise become "Dollars").
+  'dollars', 'dollar', 'bucks', 'buck', 'usd',
 ]);
 
 function stripFillers(words: string[]): string[] {
@@ -741,21 +774,30 @@ const INVALID_SINGLE_WORD_ITEM_NAMES = new Set([
   // Articles, prepositions, conjunctions
   'for', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of', 'by',
   'or', 'and', 'but', 'as', 'so', 'with',
+  'from', 'into', 'onto', 'over', 'under',
   // Common verbs
   'be', 'do', 'go', 'got', 'get', 'set',
   'call', 'song', 'have', 'had', 'has',
   'is', 'was', 'are', 'were', 'been',
   'see', 'say', 'said', 'come', 'came', 'gone', 'went',
+  'feel', 'felt', 'add', 'addded', 'plus',
+  'will', 'would', 'should', 'may', 'might', 'can', 'could',
   // Pronouns
   'it', 'its', 'we', 'i', 'me', 'my',
   'he', 'she', 'they', 'you', 'your',
+  'this', 'that', 'these', 'those', 'mine',
   // Common Scribe mishears for brand fragments
   'car', 'can', 'count', 'monkey', 'monkeys', 'county', 'counties',
   'parts', 'park', 'pile',
+  // Filler / mishears commonly appended to legitimate names
+  'video', 'videos', 'dream', 'dreams', 'babies', 'ladies',
+  // Price-context words
+  'dollars', 'dollar', 'bucks', 'buck', 'usd',
+  'money', 'price',
   // Generic adjectives / quantifiers
   'all', 'some', 'any', 'no', 'one', 'two', 'three',
   'nice', 'good', 'great', 'new', 'old',
-  // Filler
+  // Filler interjections
   'um', 'uh', 'oh', 'ah', 'well', 'like',
   'okay', 'ok', 'yeah', 'yes',
 ]);

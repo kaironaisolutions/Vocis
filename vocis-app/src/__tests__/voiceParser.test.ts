@@ -726,7 +726,11 @@ describe('Price detection — every real inventory price point', () => {
 // that aren't in the invalid list) and multi-word names ("Call Sign Jacket")
 // are unaffected.
 describe('Single-word filler/mishear words must not become item_name', () => {
-  const fillers = ['call', 'song', 'car', 'count', 'monkey', 'parts', 'good'];
+  const fillers = [
+    'call', 'song', 'car', 'count', 'monkey', 'parts', 'good',
+    'add', 'feel', 'video', 'videos', 'dream', 'plus',
+    'dollars', 'dollar', 'bucks',
+  ];
   test.each(fillers)('"%s" → item_name null', (input) => {
     const r = parseTranscript(input);
     expect(r.item_name).toBeNull();
@@ -738,8 +742,60 @@ describe('Single-word filler/mishear words must not become item_name', () => {
 
   it('multi-word phrase containing a filler word is preserved', () => {
     const r = parseTranscript('Call Sign Jacket');
-    expect(r.item_name?.toLowerCase()).toContain('call');
     expect(r.item_name?.toLowerCase()).toContain('sign');
+    expect(r.item_name?.toLowerCase()).toContain('jacket');
+  });
+});
+
+// Bugs reproduced from live console logs (commit ea32dd5 → fa3b341 era).
+// Each entry corresponds to a line we saw in real Scribe output that was
+// producing wrong fields.
+describe('Live-log regressions: garbage words must not bleed into item_name', () => {
+  it('"I feel a small Nike hat" → size S, item Nike Hat (no "Feel")', () => {
+    const r = parseTranscript('I feel a small Nike hat');
+    expect(r.size).toBe('S');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).not.toContain('feel');
+  });
+
+  it('"large 90s Nike Hat videos" → no "Videos" in item_name', () => {
+    const r = parseTranscript("large '90s Nike Hat videos");
+    expect(r.size).toBe('L');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).not.toContain('video');
+  });
+
+  it('"Nike Hat babies" → no "Babies" in item_name', () => {
+    const r = parseTranscript('Nike Hat babies');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).not.toContain('babies');
+  });
+
+  it('"90 add" → price 90, no item name', () => {
+    const r = parseTranscript('90 add');
+    expect(r.price).toBe(90);
+    expect(r.item_name).toBeNull();
+  });
+
+  it('"song 90s" → decade 90\'s, no item_name', () => {
+    const r = parseTranscript('song 90s');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name).toBeNull();
+  });
+
+  it('"with dollars" → filtered as junk (not a valid transcript)', () => {
+    expect(isValidTranscript('with dollars')).toBe(false);
+  });
+
+  it('"i feel" → filtered as junk', () => {
+    expect(isValidTranscript('i feel')).toBe(false);
+  });
+
+  it('standalone "dollars" / "with" / "add" → all filtered', () => {
+    for (const noise of ['dollars', 'dollar', 'bucks', 'with', 'add', 'plus', 'feel']) {
+      expect(isValidTranscript(noise)).toBe(false);
+    }
   });
 });
 
