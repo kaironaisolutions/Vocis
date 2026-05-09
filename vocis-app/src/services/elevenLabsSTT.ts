@@ -195,50 +195,18 @@ export class ElevenLabsSTTService {
   private callbacks: STTServiceCallbacks;
   private state: ConnectionState = 'disconnected';
   private sessionTimeout: ReturnType<typeof setTimeout> | null = null;
-  private keyterms: string[] = [];
 
   constructor(callbacks: STTServiceCallbacks) {
     this.callbacks = callbacks;
   }
 
   /**
-   * Provide a list of domain-specific terms to bias the model toward.
-   * Must be called before connect() — keyterms are sent right after the
-   * server emits session_started.
+   * Kept for callsite compatibility — keyterms are now configured on
+   * the upstream WebSocket URL via the Cloudflare Worker, per the
+   * ElevenLabs Scribe v2 Realtime spec. This method is a no-op.
    */
-  setKeyterms(terms: string[]): void {
-    this.keyterms = terms.slice(0, 250);
-  }
-
-  /**
-   * Send the per-session config (currently just keyword biasing) to
-   * ElevenLabs. Called from the session_started handler so the server
-   * has acknowledged the session before it receives our config.
-   *
-   * Best-effort: if the WS isn't open or the send throws, log and move
-   * on — the session is still usable, just without biasing, which
-   * silently degrades to base-model accuracy rather than breaking.
-   */
-  private sendSessionConfig(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.warn('[STT] Cannot send session config — WS not open (readyState:', this.ws?.readyState, ')');
-      return;
-    }
-    if (this.keyterms.length === 0) {
-      console.log('[STT] No keyterms to send');
-      return;
-    }
-    try {
-      this.ws.send(
-        JSON.stringify({
-          message_type: 'session_config',
-          keywords: this.keyterms,
-        })
-      );
-      console.log('[STT] Sent session_config with', this.keyterms.length, 'keyterms');
-    } catch (e) {
-      console.error('[STT] Failed to send session_config:', e);
-    }
+  setKeyterms(_terms: string[]): void {
+    // Intentional no-op — the Worker owns keyterm injection.
   }
 
   private setState(state: ConnectionState) {
@@ -353,10 +321,11 @@ export class ElevenLabsSTTService {
     switch (data.message_type) {
       case 'session_started':
         console.log('[STT] Session started, session_id:', data.session_id);
-        // Now that ElevenLabs has acknowledged the session, send the
-        // keyterm biasing config. Sending before session_started can be
-        // silently dropped by the server.
-        this.sendSessionConfig();
+        // Keyterm biasing is configured via repeated keyterms= URL
+        // query params on the upstream WebSocket (handled by the Worker
+        // in worker/src/index.ts, per the ElevenLabs Scribe v2 Realtime
+        // spec). The previous session_config message we sent here was
+        // silently ignored by the server — that approach is removed.
         break;
       case 'partial_transcript':
         if (typeof data.text === 'string' && data.text.trim()) {

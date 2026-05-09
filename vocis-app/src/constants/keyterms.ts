@@ -1,11 +1,19 @@
 /**
- * Default keyterms biased into ElevenLabs Scribe v2 Realtime so domain
- * vocabulary ("Carhartt", "harrington", "cableknit", …) doesn't get
- * mistranscribed as homophones.
+ * VOCIS_KEYTERMS — Domain-vocabulary reference (kept on the app side
+ * for the user-extensible Settings UI and as an unstructured reference).
  *
- * The list is built from real Vocis inventory: 4,503 items across 65
- * restock sheets. Brands are ordered roughly by frequency so the most-
- * spoken words come first, which helps when the model has to truncate.
+ * NOTE: ElevenLabs keyterm biasing is NOT applied from this list at
+ * runtime. Per the Scribe v2 Realtime spec, keyterms must be passed as
+ * repeated `keyterms=` URL query parameters on the WebSocket connection
+ * to ElevenLabs — that happens inside `worker/src/index.ts`
+ * (PRIORITY_KEYTERMS), not from the app.
+ *
+ * To add a new keyterm that actually reaches ElevenLabs:
+ *   1. Add it to PRIORITY_KEYTERMS in worker/src/index.ts
+ *   2. Run: cd worker && npx wrangler deploy
+ *
+ * The ElevenLabs spec caps the per-session list at 50 entries, each
+ * ≤20 chars; new entries should respect that.
  */
 export const VOCIS_KEYTERMS: readonly string[] = [
   // ── HIGH FREQUENCY BRANDS (50+ items) ─────────────────────────────────────

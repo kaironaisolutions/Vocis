@@ -36,6 +36,44 @@ interface Env {
   TOKEN_TTL_SECONDS: string;
 }
 
+/**
+ * ElevenLabs Scribe v2 Realtime keyterm biasing.
+ *
+ * Per the official docs, keyterms must be passed as repeated query
+ * parameters on the WebSocket URL (NOT as a session_config message
+ * after connection — that's silently ignored). Constraints:
+ *   - max 50 keyterms per session
+ *   - each keyterm max 20 chars
+ *   - +20% cost premium when keyterms are used
+ *
+ * The list is curated from real Vocis inventory: the 50 most-spoken
+ * brand and garment terms. Whole list lives in the Worker because
+ * that's where the upstream URL is built; the app's
+ * src/constants/keyterms.ts is now reference-only / used by the
+ * Settings UI for the user-extension AsyncStorage list.
+ */
+const PRIORITY_KEYTERMS: readonly string[] = [
+  // Brands (highest STT-mishear risk)
+  'Carhartt', 'Patagonia', 'Woolrich', 'Pendleton',
+  'Dickies', 'Wrangler', 'Polo', 'Nike',
+  'Nautica', 'Tommy', 'Levis', 'Eddie Bauer',
+  'Harley', 'North Face', 'Columbia', 'LL Bean',
+  'Filson', 'Lands End', 'Coogi', 'Quiksilver',
+  'Champion', 'Lee', 'Ralph Lauren', 'GAP',
+  'Starter', 'FUBU', 'Karl Kani', 'Rocawear',
+  'Nascar',
+  // Garment types most often mistranscribed
+  'windbreaker', 'harrington', 'chore coat',
+  'barn coat', 'flannel', 'trucker',
+  'carpenters', 'crewneck', 'cardigan',
+  'bomber', 'blazer', 'pullover',
+  'corduroy', 'fleece', 'hoodie',
+  'cableknit', 'shacket', 'rugby',
+  'overalls',
+  // Price-context word so dropped "dollars" still gets recognized
+  'dollars',
+];
+
 // Per-device rate tracking — in-memory, per Cloudflare Worker isolate.
 //
 // LIMITATION: Under high load CF may spin up multiple isolates, each with
@@ -207,6 +245,24 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     const value = url.searchParams.get(param);
     if (value) elevenLabsUrl.searchParams.set(param, value);
   }
+
+  // Keyterm biasing — repeated `keyterms=` query parameters per the
+  // ElevenLabs Scribe v2 Realtime spec. Filter to comply with the
+  // documented limits (≤50 entries, ≤20 chars each).
+  const validKeyterms = PRIORITY_KEYTERMS.filter((k) => k.length <= 20).slice(0, 50);
+  for (const term of validKeyterms) {
+    elevenLabsUrl.searchParams.append('keyterms', term);
+  }
+
+  // no_verbatim removes filler words ("um", "uh", "like", "you know")
+  // from transcripts before they reach us, which means they never
+  // pollute the parser's item-name extraction.
+  elevenLabsUrl.searchParams.set('no_verbatim', 'true');
+
+  console.log(
+    '[WS] Upstream URL params:',
+    `keyterms=${validKeyterms.length}, no_verbatim=true, model_id=${elevenLabsUrl.searchParams.get('model_id')}`
+  );
   console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
 
   let elevenLabsResp: Response;
