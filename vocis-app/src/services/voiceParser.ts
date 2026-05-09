@@ -251,8 +251,11 @@ export function parseDecade(text: string): string | null {
     if (lower.includes(key)) return value;
   }
 
-  // Match patterns like "90s", "90's", "1990s"
-  const shortMatch = lower.match(/^(\d{2})s?'?s?$/);
+  // Match patterns like "90s", "90's", "80's". The 's' suffix is REQUIRED —
+  // otherwise a bare two-digit price like "75" in "75 dollars" gets parsed
+  // as the decade "75's" and the price scanner is left with no number to
+  // expand backward into.
+  const shortMatch = lower.match(/^(\d{2})['']?s$/);
   if (shortMatch) {
     const num = parseInt(shortMatch[1]);
     if (num >= 50 && num <= 99) return `${num}'s`;
@@ -586,6 +589,27 @@ function detectPriceInWords(
     }
   }
 
+  // Pattern D: a contiguous run of >=2 number-words with no indicator,
+  // e.g. "forty five" → 45. The 2-word minimum stops single utterances
+  // like "twenty" from being misread as a price.
+  let runStart = -1;
+  for (let i = 0; i <= words.length; i++) {
+    const inRun = i < words.length && !consumed.has(i) && isPriceNumberWord(words[i]);
+    if (inRun) {
+      if (runStart === -1) runStart = i;
+    } else if (runStart !== -1) {
+      const runEnd = i - 1;
+      if (runEnd - runStart >= 1) {
+        const phrase = words.slice(runStart, runEnd + 1).join(' ');
+        const parsed = parsePrice(phrase);
+        if (parsed !== null && parsed > 0) {
+          return { value: parsed, start: runStart, end: runEnd };
+        }
+      }
+      runStart = -1;
+    }
+  }
+
   return null;
 }
 
@@ -601,7 +625,10 @@ function buildResult(
   price: number | null,
   itemName: string
 ): ParsedItem {
-  const trimmed = itemName.trim();
+  // Strip surrounding/trailing punctuation that web Speech APIs append.
+  // Without this, "Nike Hoodie. Twenty five dollars" leaves "Nike Hoodie."
+  // as the item name, including the period.
+  const trimmed = itemName.trim().replace(/^[\s,.;!?]+|[\s,.;!?]+$/g, '');
   const item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
 
   const confidence =

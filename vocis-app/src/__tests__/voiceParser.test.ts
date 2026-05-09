@@ -393,3 +393,67 @@ describe('edge cases', () => {
     expect(parseTranscript('fifty dollars').confidence).toBe(25);
   });
 });
+
+// ── REGRESSION: bare 2-digit numbers must not be parsed as decades ──────────
+//
+// "75 dollars" used to fail because the bare-2-digit decade regex had an
+// optional 's' suffix and matched "75" as the decade "75's", leaving the
+// price scanner with only "dollars" to work with.
+
+describe('PRICE BUG — must all return correct price', () => {
+  const cases: [string, number][] = [
+    ['$25', 25],
+    ['$75.00', 75],
+    ['25 dollars', 25],
+    ['75 dollars', 75],
+    ['seventy five dollars', 75],
+    ['twenty five dollars', 25],
+    ['one hundred dollars', 100],
+    ['fifty bucks', 50],
+    ['forty five', 45],
+    ['Nike hoodie twenty five dollars', 25],
+    ['large nineties jacket seventy five dollars', 75],
+  ];
+  test.each(cases)('"%s" → price: %s', (input, expected) => {
+    expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+describe('ITEM NAME BUG — extraction must preserve brand and garment words', () => {
+  it('Nike hoodie extracted correctly', () => {
+    const r = parseTranscript('Nike hoodie');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).toContain('hoodie');
+  });
+
+  it('brand name not eaten by size removal', () => {
+    const r = parseTranscript('small Nike hoodie');
+    expect(r.size).toBe('S');
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+  });
+
+  it('brand name not eaten by price removal', () => {
+    const r = parseTranscript('Nike hoodie twenty five dollars');
+    expect(r.price).toBe(25);
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+  });
+
+  it('full item all fields', () => {
+    const r = parseTranscript('medium nineties Nike hoodie twenty five dollars');
+    expect(r.size).toBe('M');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(25);
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+  });
+
+  it('item name capitalized correctly', () => {
+    const r = parseTranscript('polo ralph lauren shirt');
+    expect(r.item_name).toBe('Polo Ralph Lauren Shirt');
+  });
+
+  it('trailing period stripped from item name', () => {
+    const r = parseTranscript('Nike Hoodie. Twenty five dollars.');
+    expect(r.item_name).toBe('Nike Hoodie');
+    expect(r.price).toBe(25);
+  });
+});
