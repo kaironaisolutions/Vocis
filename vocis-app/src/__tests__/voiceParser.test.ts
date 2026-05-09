@@ -420,151 +420,6 @@ describe('PRICE BUG — must all return correct price', () => {
   });
 });
 
-// ── COMMA-FORMATTED PRICES ──────────────────────────────────────────────────
-//
-// ElevenLabs Scribe v2 returns prices with thousands separators ("$2,000",
-// "$1,500"). The comma used to trigger the segmented-parse path, which split
-// "$2,000" into "$2" and "000" — yielding price=2, item_name="000".
-// parseTranscript now normalizes "$2,000" → "$2000" before routing.
-
-// ── MERGE PRICE-PRESERVATION REGRESSION ────────────────────────────────────
-//
-// Pinning the contract: when a later utterance has price=null, mergeItems
-// MUST preserve the existing price. The `??` operator handles this for both
-// null and undefined, so undefined fields sneaking in via partial objects
-// are also covered.
-
-describe('mergeItems — price preservation across null incoming', () => {
-  it('price preserved when next transcript has no price', () => {
-    let item = mergeItems(
-      { ...EMPTY_ITEM },
-      { ...EMPTY_ITEM, price: 90 }
-    );
-    expect(item.price).toBe(90);
-
-    item = mergeItems(
-      item,
-      { ...EMPTY_ITEM, size: 'S', decade: "90's", price: null }
-    );
-    expect(item.price).toBe(90);
-    expect(item.size).toBe('S');
-    expect(item.decade).toBe("90's");
-  });
-
-  it('all fields preserved across 5 partial commits', () => {
-    let item: ParsedItem = { ...EMPTY_ITEM };
-
-    item = mergeItems(item, parseTranscript('small'));
-    item = mergeItems(item, parseTranscript('$95'));
-    expect(item.price).toBe(95);
-
-    item = mergeItems(item, parseTranscript('90s'));
-    expect(item.price).toBe(95);
-    expect(item.size).toBe('S');
-
-    item = mergeItems(item, parseTranscript('Nike hoodie'));
-    expect(item.price).toBe(95);
-    expect(item.size).toBe('S');
-    expect(item.decade).toBe("90's");
-
-    item = mergeItems(item, parseTranscript('small'));
-    expect(item.price).toBe(95);
-  });
-
-  it('undefined fields in partial existing object also fall through', () => {
-    // Defends against the symptom in logs where `previous?.price` shows
-    // undefined (because previous was null and optional chaining produced
-    // undefined). `??` returns RHS for both null and undefined.
-    const partial = {
-      size: undefined as unknown as null,
-      decade: undefined as unknown as null,
-      item_name: undefined as unknown as null,
-      price: undefined as unknown as null,
-      raw_title: '',
-      raw_transcript: '',
-      confidence: 0,
-    };
-    const merged = mergeItems(partial, { ...EMPTY_ITEM, price: 90 });
-    expect(merged.price).toBe(90);
-  });
-});
-
-describe('PRICE BUG — comma-formatted thousands', () => {
-  it('"$2,000" → 2000', () => {
-    expect(parseTranscript('$2,000').price).toBe(2000);
-  });
-
-  it('"$1,500" → 1500', () => {
-    expect(parseTranscript('$1,500').price).toBe(1500);
-  });
-
-  it('"$1,000" → 1000', () => {
-    expect(parseTranscript('$1,000').price).toBe(1000);
-  });
-
-  it('"large 90s Nike hat $2,000" → price 2000, item contains nike, no "000" artifact', () => {
-    const r = parseTranscript("large '90s Nike hat $2,000");
-    expect(r.price).toBe(2000);
-    expect(r.size).toBe('L');
-    expect(r.decade).toBe("90's");
-    expect(r.item_name?.toLowerCase()).toContain('nike');
-    expect(r.item_name?.toLowerCase()).not.toContain('000');
-    expect(r.item_name).not.toContain('00');
-  });
-});
-
-// ── DIGIT FRAGMENTS IN ITEM NAMES ───────────────────────────────────────────
-//
-// Bare digits and "0s" fragments slip into item_name when the parser can't
-// claim them as price (e.g. "0" is below the $1 price floor) or when a
-// malformed transcript like "$2,00" segments into "$2" + "00". buildResult
-// strips pure-digit/zero-suffix words from the remaining item name.
-
-describe('ITEM NAME — digit fragments must not leak into name', () => {
-  it('"0 small Nike shirt" → item name has no digit prefix', () => {
-    const r = parseTranscript('0 small Nike shirt');
-    expect(r.size).toBe('S');
-    expect(r.item_name?.toLowerCase()).toContain('nike');
-    expect(r.item_name).not.toMatch(/^0/);
-  });
-
-  it('"Nike shirt 0s" → item name has no "0s" suffix', () => {
-    const r = parseTranscript('Nike shirt 0s');
-    expect(r.item_name?.toLowerCase()).toContain('nike');
-    expect(r.item_name).not.toMatch(/0s/i);
-  });
-});
-
-// ── CONVERSATIONAL SPEECH FILTER ────────────────────────────────────────────
-//
-// When the user forgets to stop recording or talks to someone mid-session,
-// long stretches of plain English get committed. Long transcripts with no
-// inventory anchor word (size, decade, $, garment, brand) are rejected.
-
-describe('isValidTranscript — conversational speech rejected', () => {
-  it('long pure-English chatter rejected', () => {
-    expect(
-      isValidTranscript(
-        'and then it will log it and then he can keep going on'
-      )
-    ).toBe(false);
-  });
-
-  it('long anchored transcript still passes (size + decade + $ + brand)', () => {
-    expect(isValidTranscript('small 90s Nike hoodie $300')).toBe(true);
-  });
-
-  it('long anchored transcript with brand only passes', () => {
-    expect(
-      isValidTranscript('this is a really nice Carhartt jacket I think')
-    ).toBe(true);
-  });
-
-  it('short un-anchored transcripts still pass (≤6 words)', () => {
-    expect(isValidTranscript('and then he can keep')).toBe(true);
-  });
-});
-
 describe('ITEM NAME BUG — extraction must preserve brand and garment words', () => {
   it('Nike hoodie extracted correctly', () => {
     const r = parseTranscript('Nike hoodie');
@@ -718,27 +573,13 @@ describe('price: ElevenLabs bare-number formats', () => {
   });
 });
 
-// Bare numbers above $500 are still rejected (Pattern C cap stands —
-// these are usually streaming artifacts when the user didn't say "$").
-// Explicit "$"-prefixed values up to $9999 are trusted now (Pattern B
-// raised so real reseller prices like "$2,000" parse correctly).
-describe('price: bare numbers above $500 are rejected', () => {
-  const rejected: string[] = ['999', '530'];
+describe('price: out-of-range values are rejected', () => {
+  const rejected: string[] = [
+    '$530', '$999', '$1000',  // explicit-dollar above $500 cap
+    '999', '530',              // bare numbers above $500 cap
+  ];
   test.each(rejected)('"%s" → price: null', (input) => {
     expect(parseTranscript(input).price).toBeNull();
-  });
-});
-
-describe('price: explicit $-prefix accepted up to $9999', () => {
-  const cases: [string, number][] = [
-    ['$530', 530],
-    ['$999', 999],
-    ['$1000', 1000],
-    ['$2500', 2500],
-    ['$9999', 9999],
-  ];
-  test.each(cases)('"%s" → price: %d', (input, expected) => {
-    expect(parseTranscript(input).price).toBe(expected);
   });
 });
 

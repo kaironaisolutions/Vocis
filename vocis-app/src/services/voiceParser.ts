@@ -86,11 +86,6 @@ export function isValidTranscript(text: string): boolean {
   if (/^['`‘’]\d+$/.test(t)) return false;
   // Leading comma/space + digits: ",300", " 300" — punctuation noise.
   if (/^[,\s]+\d+$/.test(t)) return false;
-  // Zero variants with optional "s": "0", "0s", "00", "000s" — Scribe
-  // streaming artifacts left over from comma-formatted prices ("$2,000"
-  // mid-stream becomes "$2," then "0", "00", "000" — already covered for
-  // "00"/"000" below, plus "0s" which would otherwise slip through).
-  if (/^0+s?$/i.test(t)) return false;
 
   // Pure-digit fragments. The rules:
   //   - 1-digit:  too short, always junk
@@ -138,31 +133,8 @@ export function isValidTranscript(text: string): boolean {
   // Must contain at least one letter or $ — otherwise it's pure punctuation.
   if (!/[a-zA-Z$]/.test(t)) return false;
 
-  // Long transcripts with no inventory anchor — likely background chatter
-  // captured because the user forgot to stop recording or talked to someone
-  // mid-session. Real inventory utterances are short OR contain at least
-  // one of: a size word, decade indicator, dollar amount, garment, or known
-  // brand. The 7-word threshold leaves room for natural phrasing
-  // ("medium nineties Polo Ralph Lauren bomber seventy five dollars" = 9
-  // words but anchored on size/decade/brand) while filtering pure prose.
-  const wordCount = t.split(/\s+/).length;
-  if (wordCount > 6) {
-    const hasAnchor = ANCHOR_PATTERNS.some((p) => p.test(t));
-    if (!hasAnchor) return false;
-  }
-
   return true;
 }
-
-const ANCHOR_PATTERNS: RegExp[] = [
-  /\b(?:xs|s|m|l|xl|xxl|xxxl|2xl|small|medium|large)\b/i,
-  /\b(?:50s|60s|70s|80s|90s|2000s|fifties|sixties|seventies|eighties|nineties|y2k)\b/i,
-  /['‘’]\d{2}s\b/,
-  /\$\s*\d/,
-  /\b\d+\s+(?:dollars?|bucks?)\b/i,
-  /\b(?:jacket|coat|shirt|tee|t-shirt|jeans|pants|sweater|hoodie|hat|cap|beanie|vest|blazer|bomber|windbreaker|flannel|harrington|chore|cardigan|sweatshirt|trousers|shorts|skirt|dress|jumper|parka|anorak|trench|peacoat)\b/i,
-  /\b(?:carhartt|polo|nike|levi|levis|gap|wrangler|patagonia|woolrich|adidas|champion|dickies|stussy|supreme|tommy|hilfiger|nautica|ralph|lauren|gucci|prada|burberry)\b/i,
-];
 
 /**
  * Compute the per-item confidence score: 25 points for each non-null field.
@@ -478,16 +450,7 @@ export function parseTranscript(transcript: string): ParsedItem {
     ? sanitized.slice(0, MAX_TRANSCRIPT_LENGTH)
     : sanitized;
 
-  // Strip commas inside numeric thousands groups: "$2,000" → "$2000",
-  // "1,500 dollars" → "1500 dollars". Without this, the comma triggers
-  // the segmented path below, which splits on commas and shatters the
-  // number into "$2" + "000".
-  const normalized = truncated.replace(
-    /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g,
-    (m) => m.replace(/,/g, '')
-  );
-
-  const cleaned = normalized.replace(/\s+/g, ' ').trim();
+  const cleaned = truncated.replace(/\s+/g, ' ').trim();
 
   if (cleaned === '') {
     return { ...EMPTY_ITEM, raw_transcript: '' };
@@ -655,13 +618,8 @@ function parseWordByWord(text: string): ParsedItem {
   // unsafe for multi-word slices because "nineties Nike windbreaker"
   // would match "nineties" and consume the brand words too). Single
   // words still go through parseDecade for its regex patterns.
-  //
-  // $-prefixed tokens are skipped: parseDecade's 4-digit year regex
-  // would otherwise match "$2000" as the decade "2000's", consuming
-  // the token before the price detector can claim it.
   for (let i = 0; i < words.length && decade === null; i++) {
     if (consumed.has(i)) continue;
-    if (words[i].startsWith('$')) continue;
     if (i + 2 < words.length && !consumed.has(i + 1) && !consumed.has(i + 2)) {
       const three = `${words[i]} ${words[i + 1]} ${words[i + 2]}`.toLowerCase();
       if (EXTENDED_DECADE_MAP[three]) {
@@ -737,16 +695,16 @@ function detectPriceInWords(
     }
   }
 
-  // Pattern B: $-prefixed token. Capped at $9999 — the explicit "$" is
-  // a strong signal of a real price (Scribe rarely fabricates one), so
-  // we accept the full reseller range including comma-formatted prices
-  // like "$2,000" that the parseTranscript normalizer collapsed to "$2000".
+  // Pattern B: $-prefixed token. Capped at $500 — anything above is
+  // almost always a streaming artifact ("$530", "$1500"). Real high-end
+  // vintage prices in the inventory top out at $320; the cap leaves some
+  // headroom but rejects clearly-out-of-range values.
   for (let i = 0; i < words.length; i++) {
     if (consumed.has(i)) continue;
     if (!words[i].startsWith('$')) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
     const num = parseFloat(cleaned);
-    if (!isNaN(num) && num >= 1 && num <= 9999) {
+    if (!isNaN(num) && num >= 1 && num <= 500) {
       return { value: num, start: i, end: i };
     }
   }
@@ -854,19 +812,7 @@ function buildResult(
   // Without this, "Nike Hoodie. Twenty five dollars" leaves "Nike Hoodie."
   // as the item name, including the period.
   const trimmed = itemName.trim().replace(/^[\s,.;!?]+|[\s,.;!?]+$/g, '');
-
-  // Drop pure-digit and "0s"-style fragments that survived consumption.
-  // These slip through when malformed transcripts like "$2,00" split into
-  // "$2" + "00", or when bare digits ("0", "9") appear out of price context.
-  // Real garment names never contain these as standalone words.
-  const cleanedWords = trimmed.split(/\s+/).filter((w) => {
-    if (w === '') return false;
-    if (/^\d+s?$/i.test(w)) return false;
-    return true;
-  });
-  const rebuilt = cleanedWords.join(' ');
-
-  let item_name = rebuilt.length > 0 ? titleCase(rebuilt) : null;
+  let item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
 
   // Reject single-word item_names that are common filler / mishear
   // fragments. A real brand or garment name is almost always 2+ words
