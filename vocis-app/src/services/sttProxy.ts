@@ -93,17 +93,22 @@ export const STTProxy = {
   /**
    * Build the WebSocket URL for streaming.
    * Uses the proxy's /stream endpoint with the session token.
+   *
+   * Built via string concatenation rather than `new URL(...)` because
+   * React Native's built-in URL implementation does not reliably resolve
+   * relative paths against `wss://` bases (Hermes treats it as a non-special
+   * scheme), producing malformed URLs that the WebSocket constructor then
+   * fails to dial — manifests as the worker never receiving /stream even
+   * though /token over plain fetch() succeeds.
    */
   getWebSocketUrl(token: string): string {
-    const wsBase = getProxyBaseUrl().replace(/^http/, 'ws');
-    const wsUrl = new URL('/stream', wsBase);
-    wsUrl.searchParams.set('token', token);
-    // Scribe v2 Realtime session config is passed as query params so the
-    // Worker can forward them to ElevenLabs when opening the upstream connection.
-    wsUrl.searchParams.set('model_id', 'scribe_v2_realtime');
-    wsUrl.searchParams.set('language_code', 'en');
-    wsUrl.searchParams.set('sample_rate', '16000');
-    const finalUrl = wsUrl.toString();
+    const base = getProxyBaseUrl().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    const qs =
+      `token=${encodeURIComponent(token)}` +
+      `&model_id=scribe_v2_realtime` +
+      `&language_code=en` +
+      `&sample_rate=16000`;
+    const finalUrl = `wss://${base}/stream?${qs}`;
     console.log('[STT] Proxy WS URL:', finalUrl.replace(/token=[^&]+/, 'token=<redacted>'));
     return finalUrl;
   },
