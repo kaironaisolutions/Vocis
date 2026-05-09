@@ -12,6 +12,7 @@ import { Colors, Typography, Spacing, BorderRadius } from '../src/constants/them
 import { Button } from '../src/components/Button';
 import { Card } from '../src/components/Card';
 import { getSessions, deleteSession } from '../src/db/database';
+import { confirmDestructive } from '../src/services/confirm';
 import { Session } from '../src/types';
 
 export default function HomeScreen() {
@@ -33,20 +34,19 @@ export default function HomeScreen() {
   }
 
   function handleDeleteSession(session: Session) {
-    Alert.alert(
+    confirmDestructive(
       'Delete Session',
-      `Delete this session with ${session.item_count} item${session.item_count !== 1 ? 's' : ''}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            await deleteSession(session.id);
-            setSessions((prev) => prev.filter((s) => s.id !== session.id));
-          },
-        },
-      ]
+      `Delete this session with ${session.item_count} item${session.item_count !== 1 ? 's' : ''}? This cannot be undone.`,
+      'Delete',
+      async () => {
+        try {
+          await deleteSession(session.id);
+          setSessions((prev) => prev.filter((s) => s.id !== session.id));
+        } catch (e) {
+          console.error('[Delete] Session delete failed:', e);
+          Alert.alert('Delete Failed', 'Could not delete session. Please try again.');
+        }
+      }
     );
   }
 

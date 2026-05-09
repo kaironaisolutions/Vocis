@@ -12,6 +12,12 @@ export interface ParsedItem {
     price: boolean;
     item_name: boolean;
   };
+  confidence_score: number;
+}
+
+/** 0–100 score: 25 points per detected field. */
+export function getConfidenceScore(item: ParsedItem): number {
+  return item.confidence_score;
 }
 
 // Word-to-number mapping for spoken prices
@@ -166,6 +172,9 @@ export function parseTranscription(transcript: string): ParsedItem {
 
 /**
  * Parse comma-separated input: "Medium, nineties, Polo Bomber, $75"
+ *
+ * Each segment is examined independently — the parser does not assume
+ * size-first / decade-second / price-last ordering.
  */
 function parseSegmented(cleaned: string): ParsedItem {
   const segments = cleaned
@@ -190,8 +199,12 @@ function parseSegmented(cleaned: string): ParsedItem {
     if (parsed) { decade = parsed; claimed.add(i); break; }
   }
 
+  // Price segment: must look like a price (contains digits, $, or
+  // dollars/bucks indicator) to avoid eating an item-name segment that
+  // happens to contain a number-word like "seventy".
   for (let i = segments.length - 1; i >= 0; i--) {
     if (claimed.has(i)) continue;
+    if (!looksLikePrice(segments[i])) continue;
     const parsed = parsePrice(segments[i]);
     if (parsed !== null) { price = parsed; claimed.add(i); break; }
   }
@@ -204,9 +217,32 @@ function parseSegmented(cleaned: string): ParsedItem {
   return buildResult(size, decade, price, itemNameParts.join(' '));
 }
 
+/** True if a segment contains digits, $, or a price indicator word. */
+function looksLikePrice(segment: string): boolean {
+  const lower = segment.toLowerCase();
+  if (/\d/.test(lower)) return true;
+  if (lower.includes('$')) return true;
+  for (const w of lower.split(/[\s-]+/)) {
+    if (PRICE_INDICATORS.has(w.replace(/[.,]/g, ''))) return true;
+  }
+  return false;
+}
+
 /**
- * Parse natural speech word-by-word: "large 90s red Champion hoodie 74"
- * Scans for size, decade, and price tokens, everything else is item name.
+ * Parse natural speech word-by-word — order-independent.
+ *
+ * Each field is detected by content, not position:
+ *   "Medium nineties Polo seventy-five dollars"  ✓
+ *   "seventy-five dollars medium nineties Polo"  ✓
+ *   "nineties Polo fifty dollars large"          ✓
+ *
+ * Strategy:
+ *   1. Detect SIZE first (handles "size N" + multi-word phrases).
+ *   2. Detect DECADE.
+ *   3. Detect PRICE within contiguous spans of words that haven't
+ *      already been claimed by size/decade. This is what makes price
+ *      detection insensitive to where the price falls in the sentence.
+ *   4. Item name = whatever is left over.
  */
 function parseWordByWord(text: string): ParsedItem {
   const words = text.split(/\s+/);
@@ -215,29 +251,43 @@ function parseWordByWord(text: string): ParsedItem {
   let price: number | null = null;
   const consumed = new Set<number>();
 
-  // --- Find size (scan from start, check multi-word first) ---
-  for (let i = 0; i < words.length; i++) {
-    // Three-word: "xx large"
-    if (i + 1 < words.length) {
-      const twoWord = `${words[i]} ${words[i + 1]}`;
-      const parsed = parseSize(twoWord);
-      if (parsed) {
-        size = parsed;
-        consumed.add(i);
-        consumed.add(i + 1);
-        break;
-      }
-    }
-    // Single word
-    const parsed = parseSize(words[i]);
-    if (parsed) {
-      size = parsed;
+  // --- Size: "size N" pattern, then multi-word, then single-word ---
+  for (let i = 0; i < words.length - 1; i++) {
+    if (words[i].toLowerCase() !== 'size') continue;
+    const next = words[i + 1].replace(/[^\d]/g, '');
+    const num = parseInt(next, 10);
+    if (!isNaN(num) && num > 0 && num <= 60) {
+      size = String(num);
       consumed.add(i);
+      consumed.add(i + 1);
       break;
     }
   }
 
-  // --- Find decade (scan all words) ---
+  if (size === null) {
+    for (let i = 0; i < words.length; i++) {
+      if (consumed.has(i)) continue;
+      // 2-word phrase ("extra large", "xx large", "double xl")
+      if (i + 1 < words.length && !consumed.has(i + 1)) {
+        const two = `${words[i]} ${words[i + 1]}`;
+        const parsed = parseSize(two);
+        if (parsed) {
+          size = parsed;
+          consumed.add(i); consumed.add(i + 1);
+          break;
+        }
+      }
+      // Single word
+      const parsed = parseSize(words[i]);
+      if (parsed) {
+        size = parsed;
+        consumed.add(i);
+        break;
+      }
+    }
+  }
+
+  // --- Decade ---
   for (let i = 0; i < words.length; i++) {
     if (consumed.has(i)) continue;
     const parsed = parseDecade(words[i]);
@@ -248,56 +298,97 @@ function parseWordByWord(text: string): ParsedItem {
     }
   }
 
-  // --- Find price (scan from end, try progressively longer phrases) ---
-  // Try expanding from the end: "dollars", "five dollars", "seventy five dollars", etc.
-  let bestPrice: number | null = null;
-  let bestPriceStart = -1;
-  let bestPriceEnd = -1;
+  // --- Price: scan unconsumed runs, never break on a consumed gap ---
+  const priceMatch = detectPriceInWords(words, consumed);
+  if (priceMatch) {
+    price = priceMatch.value;
+    for (let j = priceMatch.start; j <= priceMatch.end; j++) consumed.add(j);
+  }
 
-  for (let startIdx = words.length - 1; startIdx >= 0; startIdx--) {
-    // Skip consumed words
-    if (consumed.has(startIdx)) break;
+  // --- Item name = remaining words ---
+  const nameParts: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    if (!consumed.has(i)) nameParts.push(words[i]);
+  }
 
-    const phrase = words.slice(startIdx, words.length).join(' ');
-    const parsed = parsePrice(phrase);
-    if (parsed !== null && parsed > (bestPrice ?? 0)) {
-      bestPrice = parsed;
-      bestPriceStart = startIdx;
-      bestPriceEnd = words.length - 1;
+  return buildResult(size, decade, price, nameParts.join(' '));
+}
+
+/** Token classification for price phrase expansion. */
+function isPriceNumberWord(raw: string): boolean {
+  const w = raw.toLowerCase().replace(/[-,.]/g, '');
+  if (w === 'and') return true;
+  if (WORD_NUMBERS[w] !== undefined) return true;
+  if (MULTIPLIERS[w] !== undefined) return true;
+  if (/^\d+(?:\.\d{1,2})?$/.test(w)) return true;
+  return false;
+}
+
+/**
+ * Locate a price phrase among the unconsumed words.
+ *
+ * Three patterns, in priority order:
+ *   A. A "dollars"/"bucks" word with number-words expanding backward through
+ *      adjacent unconsumed positions.   ("seventy five dollars")
+ *   B. A "$NN" / "$NN.NN" token.        ("$25")
+ *   C. A bare numeric token, optionally followed by "dollars".  ("75")
+ *
+ * Returns the matched value plus the word range to consume, or null.
+ */
+function detectPriceInWords(
+  words: string[],
+  consumed: Set<number>
+): { value: number; start: number; end: number } | null {
+  // Pattern A: scan all words for price indicator
+  for (let i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+    const w = words[i].toLowerCase().replace(/[.,]/g, '');
+    if (!PRICE_INDICATORS.has(w)) continue;
+
+    let start = i;
+    while (start > 0 && !consumed.has(start - 1) && isPriceNumberWord(words[start - 1])) {
+      start--;
     }
-  }
-
-  if (bestPrice !== null && bestPriceStart >= 0) {
-    price = bestPrice;
-    for (let j = bestPriceStart; j <= bestPriceEnd; j++) consumed.add(j);
-  }
-
-  // Fallback: scan for standalone numeric values
-  if (price === null) {
-    for (let i = words.length - 1; i >= 0; i--) {
-      if (consumed.has(i)) continue;
-      const word = words[i].replace(/[$,]/g, '');
-      const num = parseFloat(word);
-      if (!isNaN(num) && num > 0) {
-        price = num;
-        consumed.add(i);
-        if (i + 1 < words.length && PRICE_INDICATORS.has(words[i + 1].toLowerCase())) {
-          consumed.add(i + 1);
-        }
-        break;
+    if (start < i) {
+      const phrase = words.slice(start, i + 1).join(' ');
+      const parsed = parsePrice(phrase);
+      if (parsed !== null && parsed > 0) {
+        return { value: parsed, start, end: i };
       }
     }
   }
 
-  // --- Everything remaining is the item name ---
-  const nameParts: string[] = [];
+  // Pattern B: $-prefixed token
   for (let i = 0; i < words.length; i++) {
-    if (!consumed.has(i)) {
-      nameParts.push(words[i]);
+    if (consumed.has(i)) continue;
+    if (!words[i].startsWith('$')) continue;
+    const cleaned = words[i].replace(/[$,]/g, '');
+    const num = parseFloat(cleaned);
+    if (!isNaN(num) && num > 0) {
+      return { value: num, start: i, end: i };
     }
   }
 
-  return buildResult(size, decade, price, nameParts.join(' '));
+  // Pattern C: bare numeric token (scan from end so trailing prices win)
+  for (let i = words.length - 1; i >= 0; i--) {
+    if (consumed.has(i)) continue;
+    const cleaned = words[i].replace(/[$,]/g, '');
+    if (!/^\d+(?:\.\d{1,2})?$/.test(cleaned)) continue;
+    const num = parseFloat(cleaned);
+    if (num > 0) {
+      let end = i;
+      if (
+        i + 1 < words.length &&
+        !consumed.has(i + 1) &&
+        PRICE_INDICATORS.has(words[i + 1].toLowerCase().replace(/[.,]/g, ''))
+      ) {
+        end = i + 1;
+      }
+      return { value: num, start: i, end };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -314,18 +405,27 @@ function buildResult(
   const decadeDisplay = decade || '?';
   const priceValue = price ?? 0;
 
+  const confidence = {
+    size: size !== null,
+    decade: decade !== null,
+    price: price !== null,
+    item_name: itemName.trim().length > 0,
+  };
+
+  const confidence_score =
+    (confidence.size ? 25 : 0) +
+    (confidence.decade ? 25 : 0) +
+    (confidence.price ? 25 : 0) +
+    (confidence.item_name ? 25 : 0);
+
   return {
     size: sizeDisplay,
     decade: decadeDisplay,
     item_name: name,
     price: priceValue,
     raw_title: `(${sizeDisplay}) ${decadeDisplay} ${name}`,
-    confidence: {
-      size: size !== null,
-      decade: decade !== null,
-      price: price !== null,
-      item_name: itemName.trim().length > 0,
-    },
+    confidence,
+    confidence_score,
   };
 }
 

@@ -7,6 +7,7 @@ import { ItemPreviewCard } from '../../src/components/ItemPreviewCard';
 import { getSessionItems, deleteItem, updateItem } from '../../src/db/database';
 import { InventoryItem } from '../../src/types';
 import { validateItem, sanitizeField } from '../../src/services/validation';
+import { confirmDestructive } from '../../src/services/confirm';
 
 export default function SessionReviewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -59,36 +60,38 @@ export default function SessionReviewScreen() {
   }
 
   async function handleDelete(itemId: string) {
-    Alert.alert('Delete Item', 'Remove this item from the session?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
+    confirmDestructive(
+      'Delete Item',
+      'Remove this item from the session?',
+      'Delete',
+      async () => {
+        try {
           await deleteItem(itemId);
           setItems((prev) => prev.filter((i) => i.id !== itemId));
-        },
-      },
-    ]);
+        } catch (e) {
+          console.error('[Delete] Item delete failed:', e);
+          Alert.alert('Delete Failed', 'Could not delete item. Please try again.');
+        }
+      }
+    );
   }
 
   async function handleDeleteAll() {
-    Alert.alert(
+    confirmDestructive(
       'Delete All Items',
       `Remove all ${items.length} items from this session?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete All',
-          style: 'destructive',
-          onPress: async () => {
-            for (const item of items) {
-              await deleteItem(item.id);
-            }
-            setItems([]);
-          },
-        },
-      ]
+      'Delete All',
+      async () => {
+        try {
+          for (const item of items) {
+            await deleteItem(item.id);
+          }
+          setItems([]);
+        } catch (e) {
+          console.error('[Delete] Bulk delete failed:', e);
+          Alert.alert('Delete Failed', 'Could not delete items. Please try again.');
+        }
+      }
     );
   }
 

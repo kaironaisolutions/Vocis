@@ -7,6 +7,7 @@ import { Card } from '../src/components/Card';
 import { SecureStorage } from '../src/services/secureStorage';
 import { AppSettingsService, AppSettings } from '../src/services/appSettings';
 import { deleteAllSessions, getSessions } from '../src/db/database';
+import { confirmDestructive } from '../src/services/confirm';
 import * as LocalAuthentication from 'expo-local-authentication';
 
 export default function SettingsScreen() {
@@ -111,21 +112,20 @@ export default function SettingsScreen() {
       return;
     }
 
-    Alert.alert(
+    confirmDestructive(
       'Delete All Sessions',
       `This will permanently delete all ${sessionCount} sessions and their items. This cannot be undone.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete All',
-          style: 'destructive',
-          onPress: async () => {
-            await deleteAllSessions();
-            setSessionCount(0);
-            Alert.alert('Deleted', 'All sessions have been removed.');
-          },
-        },
-      ]
+      'Delete All',
+      async () => {
+        try {
+          await deleteAllSessions();
+          setSessionCount(0);
+          Alert.alert('Deleted', 'All sessions have been removed.');
+        } catch (e) {
+          console.error('[Delete] Delete-all-sessions failed:', e);
+          Alert.alert('Delete Failed', 'Could not delete sessions. Please try again.');
+        }
+      }
     );
   }
 

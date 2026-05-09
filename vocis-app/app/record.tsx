@@ -497,6 +497,13 @@ export default function RecordScreen() {
               <Text style={styles.autoConfirmHint}>Auto-confirming...</Text>
             )}
           </View>
+          {pendingItem.confidence_score < 50 && (
+            <View style={styles.lowConfidenceWarning}>
+              <Text style={styles.warningText}>
+                Some fields could not be detected. Please review and edit before confirming.
+              </Text>
+            </View>
+          )}
           <ItemPreviewCard
             item={{
               id: '',
@@ -689,6 +696,17 @@ const styles = StyleSheet.create({
     color: Colors.accent,
     fontSize: 12,
     fontWeight: '600',
+  },
+  lowConfidenceWarning: {
+    backgroundColor: '#FFF3CD',
+    borderRadius: BorderRadius.sm,
+    padding: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  warningText: {
+    color: '#856404',
+    fontSize: 12,
+    textAlign: 'center',
   },
   previewActions: {
     flexDirection: 'row',

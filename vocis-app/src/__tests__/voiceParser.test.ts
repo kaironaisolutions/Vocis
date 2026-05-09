@@ -180,3 +180,82 @@ describe('parseTranscription', () => {
     expect(result.item_name).toContain('Nike');
   });
 });
+
+describe('order-independent parsing', () => {
+  it('standard order works', () => {
+    const result = parseTranscription(
+      'Medium nineties Polo Ralph Lauren shirt seventy five dollars'
+    );
+    expect(result.size).toBe('M');
+    expect(result.decade).toBe("90's");
+    expect(result.price).toBe(75);
+    expect(result.item_name).toContain('Polo Ralph Lauren');
+  });
+
+  it('price first', () => {
+    const result = parseTranscription(
+      'seventy five dollars medium nineties Polo Ralph Lauren shirt'
+    );
+    expect(result.size).toBe('M');
+    expect(result.decade).toBe("90's");
+    expect(result.price).toBe(75);
+    expect(result.item_name).toContain('Polo Ralph Lauren');
+  });
+
+  it('decade first', () => {
+    const result = parseTranscription(
+      'nineties large Nike windbreaker twenty dollars'
+    );
+    expect(result.decade).toBe("90's");
+    expect(result.size).toBe('L');
+    expect(result.price).toBe(20);
+  });
+
+  it('size last', () => {
+    const result = parseTranscription(
+      'nineties Levi jeans fifty dollars large'
+    );
+    expect(result.size).toBe('L');
+    expect(result.decade).toBe("90's");
+    expect(result.price).toBe(50);
+  });
+
+  it('only item name and price', () => {
+    const result = parseTranscription(
+      'vintage leather jacket one hundred dollars'
+    );
+    expect(result.price).toBe(100);
+    expect(result.size).toBe('?');
+    expect(result.decade).toBe('?');
+    expect(result.item_name).toContain('Vintage Leather Jacket');
+  });
+
+  it('dollar sign price', () => {
+    const result = parseTranscription('medium eighties band tee $25');
+    expect(result.price).toBe(25);
+    expect(result.size).toBe('M');
+    expect(result.decade).toBe("80's");
+  });
+
+  it('numeric size with "size N" prefix', () => {
+    const result = parseTranscription(
+      'size 8 nineties floral dress forty dollars'
+    );
+    expect(result.size).toBe('8');
+    expect(result.price).toBe(40);
+    expect(result.decade).toBe("90's");
+    expect(result.item_name).toContain('Floral Dress');
+  });
+
+  it('confidence_score is 100 for a fully detected item', () => {
+    const full = parseTranscription(
+      'medium nineties Polo shirt seventy five dollars'
+    );
+    expect(full.confidence_score).toBe(100);
+  });
+
+  it('confidence_score is below 50 when most fields are missing', () => {
+    const partial = parseTranscription('vintage jacket');
+    expect(partial.confidence_score).toBeLessThan(50);
+  });
+});
