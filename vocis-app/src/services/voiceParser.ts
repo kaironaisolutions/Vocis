@@ -1,74 +1,103 @@
-import { SIZE_MAP, DECADE_MAP } from '../types';
+import { SIZE_MAP as TYPED_SIZE_MAP, DECADE_MAP as TYPED_DECADE_MAP } from '../types';
 
+/**
+ * Structured parse of a spoken inventory entry.
+ *
+ * Missing fields are `null` (never placeholder strings or zero) so the
+ * merge logic can use simple `??` semantics: incoming.value ?? existing.value
+ * — and so the UI can distinguish "field intentionally empty" from
+ * "field detected and equal to a default".
+ */
 export interface ParsedItem {
-  size: string;
-  decade: string;
-  item_name: string;
-  price: number;
+  size: string | null;
+  decade: string | null;
+  item_name: string | null;
+  price: number | null;
+  /** Human-readable label, e.g. "(M) 90's Polo Bomber". Built from the fields. */
   raw_title: string;
   /** The original transcript text we parsed — what the user actually said. */
   raw_transcript: string;
-  confidence: {
-    size: boolean;
-    decade: boolean;
-    price: boolean;
-    item_name: boolean;
-  };
-  confidence_score: number;
+  /** 0–100 score: 25 points per detected field. */
+  confidence: number;
 }
 
-/** 0–100 score: 25 points per detected field. */
+/** Default empty parse — used as the merge identity. */
+export const EMPTY_ITEM: ParsedItem = {
+  size: null,
+  decade: null,
+  item_name: null,
+  price: null,
+  raw_title: '',
+  raw_transcript: '',
+  confidence: 0,
+};
+
+/**
+ * Compute the per-item confidence score: 25 points for each non-null field.
+ */
 export function getConfidenceScore(item: ParsedItem): number {
-  return item.confidence_score;
+  return item.confidence;
 }
 
 /**
- * Merge two parsed items, keeping each field that the existing item already
- * has unless the incoming transcript actually detected a new value for it.
+ * Pick the better item_name across a merge.
  *
- * The decision is driven by the per-field confidence flags — not by checking
- * for the placeholder values ('?', 'Unknown Item', 0) — so we never overwrite
- * a real "Nike hoodie" with the placeholder "Unknown Item" coming back from
- * a follow-up utterance like "small".
+ * Rules:
+ *   1. If incoming is null → keep existing.
+ *   2. If existing is null → take incoming.
+ *   3. Otherwise prefer the longer name. Longer item names usually carry
+ *      a brand-name proper noun ("Carhartt Detroit Jacket") whereas a
+ *      one- or two-word incoming string is more often filler from a
+ *      partial utterance ("Its A", "I Would Say").
+ */
+function pickItemName(existing: string | null, incoming: string | null): string | null {
+  if (incoming === null) return existing;
+  if (existing === null) return incoming;
+  return incoming.length > existing.length ? incoming : existing;
+}
+
+/**
+ * Merge two parsed items non-destructively.
  *
- * raw_transcript always reflects the most recent transcript, so the
- * "what was heard" reveal shows the latest words the user spoke.
+ * For every field except item_name, `incoming ?? existing` — incoming wins
+ * when it actually detected a value, otherwise existing is preserved.
+ *
+ * For item_name, we use the "longer wins" heuristic above so partial
+ * utterances like "small" or "actually thirty dollars" don't replace a
+ * meaningful name accumulated from earlier transcripts.
+ *
+ * raw_transcript reflects the latest utterance for the "what was heard"
+ * reveal in the UI.
  */
 export function mergeItems(existing: ParsedItem, incoming: ParsedItem): ParsedItem {
-  const size = incoming.confidence.size ? incoming.size : existing.size;
-  const decade = incoming.confidence.decade ? incoming.decade : existing.decade;
-  const price = incoming.confidence.price ? incoming.price : existing.price;
-  const item_name = incoming.confidence.item_name ? incoming.item_name : existing.item_name;
+  const size = incoming.size ?? existing.size;
+  const decade = incoming.decade ?? existing.decade;
+  const price = incoming.price ?? existing.price;
+  const item_name = pickItemName(existing.item_name, incoming.item_name);
 
-  const confidence = {
-    size: existing.confidence.size || incoming.confidence.size,
-    decade: existing.confidence.decade || incoming.confidence.decade,
-    price: existing.confidence.price || incoming.confidence.price,
-    item_name: existing.confidence.item_name || incoming.confidence.item_name,
-  };
+  const confidence =
+    (size !== null ? 25 : 0) +
+    (decade !== null ? 25 : 0) +
+    (price !== null ? 25 : 0) +
+    (item_name !== null ? 25 : 0);
 
-  const confidence_score =
-    (confidence.size ? 25 : 0) +
-    (confidence.decade ? 25 : 0) +
-    (confidence.price ? 25 : 0) +
-    (confidence.item_name ? 25 : 0);
-
-  const sizeDisplay = confidence.size ? size : '?';
-  const decadeDisplay = confidence.decade ? decade : '?';
+  const sizeDisplay = size ?? '?';
+  const decadeDisplay = decade ?? '?';
+  const nameDisplay = item_name ?? 'Unknown Item';
 
   return {
-    size: sizeDisplay,
-    decade: decadeDisplay,
+    size,
+    decade,
     item_name,
     price,
-    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${item_name}`,
+    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${nameDisplay}`,
     raw_transcript: incoming.raw_transcript || existing.raw_transcript,
     confidence,
-    confidence_score,
   };
 }
 
-// Word-to-number mapping for spoken prices
+// ─── Number words ────────────────────────────────────────────────────────────
+
 const WORD_NUMBERS: Record<string, number> = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
   six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
@@ -83,22 +112,38 @@ const MULTIPLIERS: Record<string, number> = {
   thousand: 1000,
 };
 
-// Words that indicate price follows
 const PRICE_INDICATORS = new Set(['dollars', 'dollar', 'bucks', 'buck']);
 
 /**
- * Parse a spoken price string into a numeric value.
- * Handles: "seventy five dollars", "$75", "75 dollars", "seventy-five",
- * "one hundred twenty dollars", "74.00", etc.
+ * Retail price slang where "one fifty" colloquially means $150 (not $51).
+ * This is checked before generic word-number parsing so "one fifty" / "two
+ * fifty" / etc. resolve to the hundreds value resellers actually mean.
  */
+const PRICE_SLANG: Record<string, number> = {
+  'one fifty': 150,
+  'two fifty': 250,
+  'three fifty': 350,
+  'four fifty': 450,
+  'five fifty': 550,
+  'six fifty': 650,
+  'seven fifty': 750,
+  'eight fifty': 850,
+  'nine fifty': 950,
+};
+
+// ─── Public small-string parsers (still used by tests + segmented path) ──────
+
 export function parsePrice(text: string): number | null {
   const cleaned = text.toLowerCase().replace(/dollars?|bucks?|\$/g, '').trim();
+  if (cleaned === '') return null;
 
-  // Try direct numeric parse first: "75", "75.00", "12.50"
+  // Slang first: "one fifty" → 150
+  if (PRICE_SLANG[cleaned] !== undefined) return PRICE_SLANG[cleaned];
+
+  // Direct numeric: "75", "75.00", "12.50"
   const directNum = parseFloat(cleaned.replace(/,/g, ''));
   if (!isNaN(directNum) && directNum > 0) return directNum;
 
-  // Parse word-based numbers
   const words = cleaned.replace(/-/g, ' ').split(/\s+/).filter(Boolean);
   if (words.length === 0) return null;
 
@@ -135,35 +180,74 @@ export function parsePrice(text: string): number | null {
 }
 
 /**
- * Extract size from a single token or short phrase.
+ * Local extension to SIZE_MAP for entries that don't live in src/types.
+ * Keeping these here avoids broadening the Size enum unnecessarily.
  */
+const EXTENDED_SIZE_MAP: Record<string, string> = {
+  ...TYPED_SIZE_MAP,
+  'double extra large': 'XXL',
+  'triple extra large': 'XXXL',
+  'one size': 'OS',
+  'one size fits all': 'OS',
+  'os': 'OS',
+  'free size': 'OS',
+};
+
+const SIZE_MULTI_WORD = [
+  'one size fits all',
+  'one size',
+  'free size',
+  'double extra large',
+  'triple extra large',
+  'extra small',
+  'x small',
+  'extra large',
+  'x large',
+  'xx large',
+  'double xl',
+];
+
+const SIZE_SINGLE_WORD = [
+  'small', 'medium', 'large',
+  'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', '2xl', 'os',
+];
+
 export function parseSize(text: string): string | null {
   const lower = text.toLowerCase().trim();
+  if (lower === '') return null;
 
-  if (SIZE_MAP[lower]) return SIZE_MAP[lower];
+  if (EXTENDED_SIZE_MAP[lower]) return EXTENDED_SIZE_MAP[lower];
 
-  const multiWordSizes = ['extra small', 'x small', 'extra large', 'x large', 'xx large', 'double xl'];
-  for (const phrase of multiWordSizes) {
-    if (lower.includes(phrase)) return SIZE_MAP[phrase]!;
+  for (const phrase of SIZE_MULTI_WORD) {
+    if (lower.includes(phrase) && EXTENDED_SIZE_MAP[phrase]) {
+      return EXTENDED_SIZE_MAP[phrase];
+    }
   }
 
-  const singleWordSizes = ['small', 'medium', 'large', 'xs', 's', 'm', 'l', 'xl', 'xxl', '2xl'];
-  for (const word of singleWordSizes) {
-    if (lower === word) return SIZE_MAP[word]!;
+  for (const word of SIZE_SINGLE_WORD) {
+    if (lower === word && EXTENDED_SIZE_MAP[word]) {
+      return EXTENDED_SIZE_MAP[word];
+    }
   }
 
   return null;
 }
 
-/**
- * Extract decade from a token.
- */
+const EXTENDED_DECADE_MAP: Record<string, string> = {
+  ...TYPED_DECADE_MAP,
+  'y2k': "2000's",
+  'early two thousands': "2000's",
+  'late nineties': "90's",
+  'early nineties': "90's",
+};
+
 export function parseDecade(text: string): string | null {
   const lower = text.toLowerCase().trim();
+  if (lower === '') return null;
 
-  if (DECADE_MAP[lower]) return DECADE_MAP[lower];
+  if (EXTENDED_DECADE_MAP[lower]) return EXTENDED_DECADE_MAP[lower];
 
-  for (const [key, value] of Object.entries(DECADE_MAP)) {
+  for (const [key, value] of Object.entries(EXTENDED_DECADE_MAP)) {
     if (lower.includes(key)) return value;
   }
 
@@ -187,7 +271,43 @@ export function parseDecade(text: string): string | null {
   return null;
 }
 
-// Maximum input length to prevent DoS
+// ─── Filler-word filter for item-name extraction ─────────────────────────────
+
+/**
+ * Words that are nearly always disfluencies or grammatical glue rather than
+ * part of the item description. They get stripped from item_name extraction
+ * so transcripts like "its a large" or "I would say ninety dollars" don't
+ * inject "Its A" or "I Would Say" as the item name.
+ */
+const FILLER_WORDS = new Set([
+  'um', 'uh', 'er', 'ah', 'eh', 'mm', 'hmm',
+  'a', 'an', 'the',
+  'this', 'that', 'these', 'those',
+  'is', 'was', 'are', 'were', 'be', 'been',
+  'its', "it's", 'it',
+  'my', 'your', 'his', 'her',
+  'i', "i'd", "i'll", "i'm", "i've",
+  'would', 'should', 'could',
+  'say', 'said', 'think', 'thought', 'mean', 'guess',
+  'really', 'just', 'maybe', 'literally', 'actually',
+  'like', 'you', 'know',
+  'from', 'of', 'with',
+  'so', 'and', 'but',
+  'nice', 'pretty',
+  'kind', 'sort',
+  'in', 'on',
+  'about',
+]);
+
+function stripFillers(words: string[]): string[] {
+  return words.filter((w) => {
+    const cleaned = w.toLowerCase().replace(/[.,!?]/g, '');
+    return cleaned !== '' && !FILLER_WORDS.has(cleaned);
+  });
+}
+
+// ─── Top-level transcript parsers ────────────────────────────────────────────
+
 const MAX_TRANSCRIPT_LENGTH = 1000;
 
 /**
@@ -195,9 +315,11 @@ const MAX_TRANSCRIPT_LENGTH = 1000;
  * Handles both comma-separated and natural speech:
  *   "Medium, nineties, Polo Red Quilted Bomber, seventy-five dollars"
  *   "large 90s red Champion hoodie 74"
+ *
+ * Missing fields come back as `null`. Use {@link mergeItems} to combine
+ * multiple parses across utterances.
  */
-export function parseTranscription(transcript: string): ParsedItem {
-  // Strip control characters before any processing to prevent UI corruption
+export function parseTranscript(transcript: string): ParsedItem {
   const sanitized = transcript.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
   const truncated = sanitized.length > MAX_TRANSCRIPT_LENGTH
@@ -206,26 +328,31 @@ export function parseTranscription(transcript: string): ParsedItem {
 
   const cleaned = truncated.replace(/\s+/g, ' ').trim();
 
-  // Check if input has commas — if so, try segment-based parsing first
-  if (cleaned.includes(',')) {
-    const result = parseSegmented(cleaned);
-    if (result.confidence.size || result.confidence.decade || result.confidence.price) {
-      result.raw_transcript = cleaned;
-      return result;
-    }
+  if (cleaned === '') {
+    return { ...EMPTY_ITEM, raw_transcript: '' };
   }
 
-  // Always try word-by-word parsing (handles natural speech)
-  const result = parseWordByWord(cleaned);
+  let result: ParsedItem;
+  if (cleaned.includes(',')) {
+    const segmented = parseSegmented(cleaned);
+    if (segmented.size !== null || segmented.decade !== null || segmented.price !== null) {
+      result = segmented;
+    } else {
+      result = parseWordByWord(cleaned);
+    }
+  } else {
+    result = parseWordByWord(cleaned);
+  }
+
   result.raw_transcript = cleaned;
   return result;
 }
 
+/** Backwards-compatible alias for the previous public name. */
+export const parseTranscription = parseTranscript;
+
 /**
  * Parse comma-separated input: "Medium, nineties, Polo Bomber, $75"
- *
- * Each segment is examined independently — the parser does not assume
- * size-first / decade-second / price-last ordering.
  */
 function parseSegmented(cleaned: string): ParsedItem {
   const segments = cleaned
@@ -250,9 +377,6 @@ function parseSegmented(cleaned: string): ParsedItem {
     if (parsed) { decade = parsed; claimed.add(i); break; }
   }
 
-  // Price segment: must look like a price (contains digits, $, or
-  // dollars/bucks indicator) to avoid eating an item-name segment that
-  // happens to contain a number-word like "seventy".
   for (let i = segments.length - 1; i >= 0; i--) {
     if (claimed.has(i)) continue;
     if (!looksLikePrice(segments[i])) continue;
@@ -268,7 +392,6 @@ function parseSegmented(cleaned: string): ParsedItem {
   return buildResult(size, decade, price, itemNameParts.join(' '));
 }
 
-/** True if a segment contains digits, $, or a price indicator word. */
 function looksLikePrice(segment: string): boolean {
   const lower = segment.toLowerCase();
   if (/\d/.test(lower)) return true;
@@ -280,20 +403,13 @@ function looksLikePrice(segment: string): boolean {
 }
 
 /**
- * Parse natural speech word-by-word — order-independent.
+ * Order-independent natural-speech parser.
  *
- * Each field is detected by content, not position:
- *   "Medium nineties Polo seventy-five dollars"  ✓
- *   "seventy-five dollars medium nineties Polo"  ✓
- *   "nineties Polo fifty dollars large"          ✓
- *
- * Strategy:
  *   1. Detect SIZE first (handles "size N" + multi-word phrases).
  *   2. Detect DECADE.
- *   3. Detect PRICE within contiguous spans of words that haven't
- *      already been claimed by size/decade. This is what makes price
- *      detection insensitive to where the price falls in the sentence.
- *   4. Item name = whatever is left over.
+ *   3. Detect PRICE within unconsumed words (slang first, then indicator
+ *      patterns, then bare numerics).
+ *   4. Item name = remaining non-filler words.
  */
 function parseWordByWord(text: string): ParsedItem {
   const words = text.split(/\s+/);
@@ -302,33 +418,53 @@ function parseWordByWord(text: string): ParsedItem {
   let price: number | null = null;
   const consumed = new Set<number>();
 
-  // --- Size: "size N" pattern, then multi-word, then single-word ---
+  // Slang prices first ("one fifty" / "two fifty" before any other detection)
   for (let i = 0; i < words.length - 1; i++) {
+    if (consumed.has(i) || consumed.has(i + 1)) continue;
+    const phrase = `${words[i]} ${words[i + 1]}`.toLowerCase().replace(/[.,]/g, '');
+    if (PRICE_SLANG[phrase] !== undefined) {
+      price = PRICE_SLANG[phrase];
+      consumed.add(i); consumed.add(i + 1);
+      break;
+    }
+  }
+
+  // "size N" pattern
+  for (let i = 0; i < words.length - 1; i++) {
+    if (consumed.has(i) || consumed.has(i + 1)) continue;
     if (words[i].toLowerCase() !== 'size') continue;
     const next = words[i + 1].replace(/[^\d]/g, '');
     const num = parseInt(next, 10);
     if (!isNaN(num) && num > 0 && num <= 60) {
       size = String(num);
-      consumed.add(i);
-      consumed.add(i + 1);
+      consumed.add(i); consumed.add(i + 1);
       break;
     }
   }
 
+  // Multi-word size, then single word
   if (size === null) {
     for (let i = 0; i < words.length; i++) {
       if (consumed.has(i)) continue;
-      // 2-word phrase ("extra large", "xx large", "double xl")
+      // 3-word
+      if (i + 2 < words.length && !consumed.has(i + 1) && !consumed.has(i + 2)) {
+        const three = `${words[i]} ${words[i + 1]} ${words[i + 2]}`.toLowerCase();
+        if (EXTENDED_SIZE_MAP[three]) {
+          size = EXTENDED_SIZE_MAP[three];
+          consumed.add(i); consumed.add(i + 1); consumed.add(i + 2);
+          break;
+        }
+      }
+      // 2-word
       if (i + 1 < words.length && !consumed.has(i + 1)) {
-        const two = `${words[i]} ${words[i + 1]}`;
-        const parsed = parseSize(two);
-        if (parsed) {
-          size = parsed;
+        const two = `${words[i]} ${words[i + 1]}`.toLowerCase();
+        if (EXTENDED_SIZE_MAP[two]) {
+          size = EXTENDED_SIZE_MAP[two];
           consumed.add(i); consumed.add(i + 1);
           break;
         }
       }
-      // Single word
+      // Single word — only via parseSize (which checks against the SINGLE list)
       const parsed = parseSize(words[i]);
       if (parsed) {
         size = parsed;
@@ -338,9 +474,29 @@ function parseWordByWord(text: string): ParsedItem {
     }
   }
 
-  // --- Decade ---
-  for (let i = 0; i < words.length; i++) {
+  // Decade — try 3-word and 2-word phrases via EXACT lookup against
+  // EXTENDED_DECADE_MAP (parseDecade itself uses .includes() which is
+  // unsafe for multi-word slices because "nineties Nike windbreaker"
+  // would match "nineties" and consume the brand words too). Single
+  // words still go through parseDecade for its regex patterns.
+  for (let i = 0; i < words.length && decade === null; i++) {
     if (consumed.has(i)) continue;
+    if (i + 2 < words.length && !consumed.has(i + 1) && !consumed.has(i + 2)) {
+      const three = `${words[i]} ${words[i + 1]} ${words[i + 2]}`.toLowerCase();
+      if (EXTENDED_DECADE_MAP[three]) {
+        decade = EXTENDED_DECADE_MAP[three];
+        consumed.add(i); consumed.add(i + 1); consumed.add(i + 2);
+        break;
+      }
+    }
+    if (i + 1 < words.length && !consumed.has(i + 1)) {
+      const two = `${words[i]} ${words[i + 1]}`.toLowerCase();
+      if (EXTENDED_DECADE_MAP[two]) {
+        decade = EXTENDED_DECADE_MAP[two];
+        consumed.add(i); consumed.add(i + 1);
+        break;
+      }
+    }
     const parsed = parseDecade(words[i]);
     if (parsed) {
       decade = parsed;
@@ -349,23 +505,25 @@ function parseWordByWord(text: string): ParsedItem {
     }
   }
 
-  // --- Price: scan unconsumed runs, never break on a consumed gap ---
-  const priceMatch = detectPriceInWords(words, consumed);
-  if (priceMatch) {
-    price = priceMatch.value;
-    for (let j = priceMatch.start; j <= priceMatch.end; j++) consumed.add(j);
+  // Price
+  if (price === null) {
+    const priceMatch = detectPriceInWords(words, consumed);
+    if (priceMatch) {
+      price = priceMatch.value;
+      for (let j = priceMatch.start; j <= priceMatch.end; j++) consumed.add(j);
+    }
   }
 
-  // --- Item name = remaining words ---
-  const nameParts: string[] = [];
+  // Item name = remaining non-filler words
+  const remaining: string[] = [];
   for (let i = 0; i < words.length; i++) {
-    if (!consumed.has(i)) nameParts.push(words[i]);
+    if (!consumed.has(i)) remaining.push(words[i]);
   }
+  const meaningful = stripFillers(remaining);
 
-  return buildResult(size, decade, price, nameParts.join(' '));
+  return buildResult(size, decade, price, meaningful.join(' '));
 }
 
-/** Token classification for price phrase expansion. */
 function isPriceNumberWord(raw: string): boolean {
   const w = raw.toLowerCase().replace(/[-,.]/g, '');
   if (w === 'and') return true;
@@ -375,22 +533,11 @@ function isPriceNumberWord(raw: string): boolean {
   return false;
 }
 
-/**
- * Locate a price phrase among the unconsumed words.
- *
- * Three patterns, in priority order:
- *   A. A "dollars"/"bucks" word with number-words expanding backward through
- *      adjacent unconsumed positions.   ("seventy five dollars")
- *   B. A "$NN" / "$NN.NN" token.        ("$25")
- *   C. A bare numeric token, optionally followed by "dollars".  ("75")
- *
- * Returns the matched value plus the word range to consume, or null.
- */
 function detectPriceInWords(
   words: string[],
   consumed: Set<number>
 ): { value: number; start: number; end: number } | null {
-  // Pattern A: scan all words for price indicator
+  // Pattern A: "dollars"/"bucks" indicator — expand backward through number words
   for (let i = 0; i < words.length; i++) {
     if (consumed.has(i)) continue;
     const w = words[i].toLowerCase().replace(/[.,]/g, '');
@@ -420,7 +567,7 @@ function detectPriceInWords(
     }
   }
 
-  // Pattern C: bare numeric token (scan from end so trailing prices win)
+  // Pattern C: bare numeric token, optionally followed by "dollars"
   for (let i = words.length - 1; i >= 0; i--) {
     if (consumed.has(i)) continue;
     const cleaned = words[i].replace(/[$,]/g, '');
@@ -444,6 +591,9 @@ function detectPriceInWords(
 
 /**
  * Build the final ParsedItem from extracted fields.
+ *
+ * `itemName` here is whatever text was left after size/decade/price words
+ * were claimed. Empty or filler-only input becomes `item_name: null`.
  */
 function buildResult(
   size: string | null,
@@ -451,33 +601,27 @@ function buildResult(
   price: number | null,
   itemName: string
 ): ParsedItem {
-  const name = titleCase(itemName.trim()) || 'Unknown Item';
-  const sizeDisplay = size || '?';
-  const decadeDisplay = decade || '?';
-  const priceValue = price ?? 0;
+  const trimmed = itemName.trim();
+  const item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
 
-  const confidence = {
-    size: size !== null,
-    decade: decade !== null,
-    price: price !== null,
-    item_name: itemName.trim().length > 0,
-  };
+  const confidence =
+    (size !== null ? 25 : 0) +
+    (decade !== null ? 25 : 0) +
+    (price !== null ? 25 : 0) +
+    (item_name !== null ? 25 : 0);
 
-  const confidence_score =
-    (confidence.size ? 25 : 0) +
-    (confidence.decade ? 25 : 0) +
-    (confidence.price ? 25 : 0) +
-    (confidence.item_name ? 25 : 0);
+  const sizeDisplay = size ?? '?';
+  const decadeDisplay = decade ?? '?';
+  const nameDisplay = item_name ?? 'Unknown Item';
 
   return {
-    size: sizeDisplay,
-    decade: decadeDisplay,
-    item_name: name,
-    price: priceValue,
-    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${name}`,
+    size,
+    decade,
+    item_name,
+    price,
+    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${nameDisplay}`,
     raw_transcript: '',
     confidence,
-    confidence_score,
   };
 }
 
@@ -495,15 +639,12 @@ function titleCase(str: string): string {
  * Split a continuous transcript into multiple inventory items.
  * Detects item boundaries by finding a price (number) followed by
  * a size word (which starts the next item).
- *
- * Example: "large 90s red champion hoodie 74 medium nineties polo bomber 75"
- *  → ["large 90s red champion hoodie 74", "medium nineties polo bomber 75"]
  */
 export function splitMultipleItems(transcript: string): string[] {
   const words = transcript.split(/\s+/);
   const sizeWords = new Set([
     'small', 'medium', 'large', 'xs', 'xl', 'xxl', '2xl',
-    'extra', // "extra large" — next word check handles this
+    'extra',
   ]);
 
   const items: string[] = [];
@@ -520,7 +661,6 @@ export function splitMultipleItems(transcript: string): string[] {
       lastPriceEnd = i;
     }
 
-    // A size word after a price means a new item is starting
     if (lastPriceEnd >= 0 && i > lastPriceEnd && sizeWords.has(word)) {
       const itemText = words.slice(currentStart, i).join(' ').trim();
       if (itemText) items.push(itemText);

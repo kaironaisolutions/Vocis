@@ -91,7 +91,7 @@ export function useRecording(): UseRecordingResult {
       const current = items[items.length - 1];
       if (current) {
         const parsed = parseTranscription(current);
-        if (parsed.confidence.size || parsed.confidence.decade) {
+        if (parsed.size !== null || parsed.decade !== null) {
           // Merge into the existing pending item so partial transcripts
           // accumulate fields rather than overwriting prior detections.
           setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
@@ -107,7 +107,7 @@ export function useRecording(): UseRecordingResult {
 
       for (const text of itemTexts) {
         const parsed = parseTranscription(text);
-        if (parsed.confidence.price) {
+        if (parsed.price !== null) {
           // Complete item — auto-confirm
           newConfirmed.push(parsed);
         } else {
@@ -122,11 +122,7 @@ export function useRecording(): UseRecordingResult {
       }
 
       // Merge the incomplete fragment into any prior pending item so the
-      // user can build one item up across multiple utterances. If the
-      // current transcript fully completed all items (no lastIncomplete),
-      // we leave pendingItem alone — the price-bearing items already
-      // auto-confirmed and clearing pending here would discard any
-      // half-built next item.
+      // user can build one item up across multiple utterances.
       if (lastIncomplete) {
         setPendingItem((prev) => (prev ? mergeItems(prev, lastIncomplete!) : lastIncomplete));
       }

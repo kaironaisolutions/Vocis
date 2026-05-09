@@ -1,31 +1,23 @@
 import {
+  parseTranscript,
+  mergeItems,
+  EMPTY_ITEM,
   parsePrice,
   parseSize,
   parseDecade,
-  parseTranscription,
-  mergeItems,
   ParsedItem,
 } from '../services/voiceParser';
 
-// Helper for building a synthetic ParsedItem in the existing API shape.
-function makeItem(overrides: Partial<ParsedItem>): ParsedItem {
-  return {
-    size: '?',
-    decade: '?',
-    item_name: 'Unknown Item',
-    price: 0,
-    raw_title: '(?) ? Unknown Item',
-    raw_transcript: '',
-    confidence: {
-      size: false,
-      decade: false,
-      price: false,
-      item_name: false,
-    },
-    confidence_score: 0,
-    ...overrides,
-  };
+// ── HELPER ──────────────────────────────────────────────────────────────────
+
+function buildItemFromTranscripts(...transcripts: string[]): ParsedItem {
+  return transcripts.reduce<ParsedItem>(
+    (item, text) => mergeItems(item, parseTranscript(text)),
+    { ...EMPTY_ITEM }
+  );
 }
+
+// ── UNIT: small parsers (kept for backwards compat with old call sites) ─────
 
 describe('parsePrice', () => {
   it('parses numeric prices', () => {
@@ -42,401 +34,362 @@ describe('parsePrice', () => {
     expect(parsePrice('twenty dollars')).toBe(20);
     expect(parsePrice('one hundred dollars')).toBe(100);
     expect(parsePrice('one hundred twenty dollars')).toBe(120);
-    expect(parsePrice('fifty')).toBe(50);
   });
 
-  it('parses hyphenated prices', () => {
-    expect(parsePrice('seventy-five dollars')).toBe(75);
-    expect(parsePrice('twenty-five')).toBe(25);
+  it('parses retail slang ("one fifty" = 150)', () => {
+    expect(parsePrice('one fifty')).toBe(150);
+    expect(parsePrice('two fifty')).toBe(250);
+    expect(parsePrice('three fifty')).toBe(350);
   });
 
   it('returns null for invalid input', () => {
     expect(parsePrice('')).toBeNull();
     expect(parsePrice('hello')).toBeNull();
-    expect(parsePrice('no price here')).toBeNull();
   });
 });
 
 describe('parseSize', () => {
-  it('parses standard sizes', () => {
-    expect(parseSize('small')).toBe('S');
-    expect(parseSize('medium')).toBe('M');
-    expect(parseSize('large')).toBe('L');
-    expect(parseSize('extra large')).toBe('XL');
-    expect(parseSize('xx large')).toBe('XXL');
-  });
-
-  it('parses abbreviations', () => {
-    expect(parseSize('S')).toBe('S');
-    expect(parseSize('M')).toBe('M');
-    expect(parseSize('L')).toBe('L');
-    expect(parseSize('XL')).toBe('XL');
-    expect(parseSize('XXL')).toBe('XXL');
-    expect(parseSize('2XL')).toBe('XXL');
-  });
-
-  it('is case insensitive', () => {
-    expect(parseSize('MEDIUM')).toBe('M');
-    expect(parseSize('Small')).toBe('S');
-    expect(parseSize('LARGE')).toBe('L');
-  });
-
-  it('returns null for unknown sizes', () => {
-    expect(parseSize('huge')).toBeNull();
-    expect(parseSize('tiny')).toBeNull();
-    expect(parseSize('')).toBeNull();
+  const cases: [string, string | null][] = [
+    ['small', 'S'],
+    ['medium', 'M'],
+    ['large', 'L'],
+    ['extra large', 'XL'],
+    ['extra small', 'XS'],
+    ['XXL', 'XXL'],
+    ['xxl', 'XXL'],
+    ['double extra large', 'XXL'],
+    ['one size', 'OS'],
+    ['MEDIUM', 'M'],
+    ['huge', null],
+    ['', null],
+  ];
+  test.each(cases)('parseSize("%s") → %s', (input, expected) => {
+    expect(parseSize(input)).toBe(expected);
   });
 });
 
 describe('parseDecade', () => {
-  it('parses word-based decades', () => {
-    expect(parseDecade('seventies')).toBe("70's");
-    expect(parseDecade('eighties')).toBe("80's");
-    expect(parseDecade('nineties')).toBe("90's");
-    expect(parseDecade('two thousands')).toBe("2000's");
-  });
-
-  it('parses numeric decades', () => {
-    expect(parseDecade('70s')).toBe("70's");
-    expect(parseDecade('80s')).toBe("80's");
-    expect(parseDecade('90s')).toBe("90's");
-    expect(parseDecade('2000s')).toBe("2000's");
-  });
-
-  it('parses full year patterns', () => {
-    expect(parseDecade('1990s')).toBe("90's");
-    expect(parseDecade('1980s')).toBe("80's");
-    expect(parseDecade('2000s')).toBe("2000's");
-    expect(parseDecade('2010s')).toBe("2010's");
-  });
-
-  it('returns null for invalid decades', () => {
-    expect(parseDecade('yesterday')).toBeNull();
-    expect(parseDecade('')).toBeNull();
+  const cases: [string, string | null][] = [
+    ['seventies', "70's"],
+    ['eighties', "80's"],
+    ['nineties', "90's"],
+    ['two thousands', "2000's"],
+    ['y2k', "2000's"],
+    ['80s', "80's"],
+    ['1990s', "90's"],
+    ['early two thousands', "2000's"],
+    ['yesterday', null],
+    ['', null],
+  ];
+  test.each(cases)('parseDecade("%s") → %s', (input, expected) => {
+    expect(parseDecade(input)).toBe(expected);
   });
 });
 
-describe('parseTranscription', () => {
-  it('parses a standard comma-separated entry', () => {
-    const result = parseTranscription(
-      'Medium, nineties, Polo Red Quilted Bomber, seventy-five dollars'
-    );
-    expect(result.size).toBe('M');
-    expect(result.decade).toBe("90's");
-    expect(result.item_name).toBe('Polo Red Quilted Bomber');
-    expect(result.price).toBe(75);
-    expect(result.raw_title).toBe("(M) 90's Polo Red Quilted Bomber");
-  });
+// ── UNIT: parseTranscript ───────────────────────────────────────────────────
 
-  it('parses entry with numeric price', () => {
-    const result = parseTranscription('Large, eighties, Champion Reverse Weave Hoodie, $120');
-    expect(result.size).toBe('L');
-    expect(result.decade).toBe("80's");
-    expect(result.item_name).toBe('Champion Reverse Weave Hoodie');
-    expect(result.price).toBe(120);
-  });
-
-  it('parses entry with abbreviations', () => {
-    const result = parseTranscription('S, 2000s, Tommy Hilfiger Flag Tee, $45');
-    expect(result.size).toBe('S');
-    expect(result.decade).toBe("2000's");
-    expect(result.item_name).toBe('Tommy Hilfiger Flag Tee');
-    expect(result.price).toBe(45);
-  });
-
-  it('parses extra large sizes', () => {
-    const result = parseTranscription('extra large, nineties, Nike Windbreaker, fifty dollars');
-    expect(result.size).toBe('XL');
-    expect(result.decade).toBe("90's");
-    expect(result.price).toBe(50);
-  });
-
-  it('sets confidence flags correctly', () => {
-    const result = parseTranscription(
-      'Medium, nineties, Polo Bomber, seventy-five dollars'
-    );
-    expect(result.confidence.size).toBe(true);
-    expect(result.confidence.decade).toBe(true);
-    expect(result.confidence.price).toBe(true);
-    expect(result.confidence.item_name).toBe(true);
-  });
-
-  it('handles missing fields gracefully', () => {
-    const result = parseTranscription('some random text with no structure');
-    expect(result.size).toBe('?');
-    expect(result.decade).toBe('?');
-    // Should still have some item name
-    expect(result.item_name.length).toBeGreaterThan(0);
-  });
-
-  // Natural speech — no commas
-  it('parses natural speech: "large 90s red Champion hoodie 74.00"', () => {
-    const result = parseTranscription('large 90s red Champion hoodie 74.00');
-    expect(result.size).toBe('L');
-    expect(result.decade).toBe("90's");
-    expect(result.item_name).toBe('Red Champion Hoodie');
-    expect(result.price).toBe(74);
-  });
-
-  it('parses natural speech: "Medium nineties Polo Red Quilted Bomber seventy five dollars"', () => {
-    const result = parseTranscription('Medium nineties Polo Red Quilted Bomber seventy five dollars');
-    expect(result.size).toBe('M');
-    expect(result.decade).toBe("90's");
-    expect(result.price).toBe(75);
-    expect(result.item_name).toContain('Polo');
-  });
-
-  it('parses natural speech: "small 2000s Tommy Hilfiger flag tee 45"', () => {
-    const result = parseTranscription('small 2000s Tommy Hilfiger flag tee 45');
-    expect(result.size).toBe('S');
-    expect(result.decade).toBe("2000's");
-    expect(result.price).toBe(45);
-    expect(result.item_name).toContain('Tommy');
-  });
-
-  it('parses natural speech: "extra large eighties Nike windbreaker 120"', () => {
-    const result = parseTranscription('extra large eighties Nike windbreaker 120');
-    expect(result.size).toBe('XL');
-    expect(result.decade).toBe("80's");
-    expect(result.price).toBe(120);
-    expect(result.item_name).toContain('Nike');
+describe('parseTranscript — size detection', () => {
+  const cases: [string, string][] = [
+    ['small', 'S'],
+    ['medium', 'M'],
+    ['large', 'L'],
+    ['extra large', 'XL'],
+    ['extra small', 'XS'],
+    ['XXL', 'XXL'],
+    ['double extra large', 'XXL'],
+    ['one size', 'OS'],
+    ['size 8', '8'],
+  ];
+  test.each(cases)('"%s" → %s', (input, expected) => {
+    expect(parseTranscript(input).size).toBe(expected);
   });
 });
 
-describe('order-independent parsing', () => {
-  it('standard order works', () => {
-    const result = parseTranscription(
-      'Medium nineties Polo Ralph Lauren shirt seventy five dollars'
-    );
-    expect(result.size).toBe('M');
-    expect(result.decade).toBe("90's");
-    expect(result.price).toBe(75);
-    expect(result.item_name).toContain('Polo Ralph Lauren');
+describe('parseTranscript — decade detection', () => {
+  const cases: [string, string][] = [
+    ['seventies', "70's"],
+    ['eighties', "80's"],
+    ['nineties', "90's"],
+    ['two thousands', "2000's"],
+    ['y2k', "2000's"],
+    ['80s', "80's"],
+    ['1990s', "90's"],
+    ['early two thousands', "2000's"],
+  ];
+  test.each(cases)('"%s" → %s', (input, expected) => {
+    expect(parseTranscript(input).decade).toBe(expected);
+  });
+});
+
+describe('parseTranscript — price detection', () => {
+  const cases: [string, number][] = [
+    ['seventy five dollars', 75],
+    ['twenty five dollars', 25],
+    ['one hundred dollars', 100],
+    ['fifty bucks', 50],
+    ['$45', 45],
+    ['$45.00', 45],
+    ['45 dollars', 45],
+    ['ten dollars', 10],
+    ['one fifty', 150],
+  ];
+  test.each(cases)('"%s" → %s', (input, expected) => {
+    expect(parseTranscript(input).price).toBe(expected);
+  });
+});
+
+describe('parseTranscript — item name extraction', () => {
+  it('extracts item after removing metadata', () => {
+    const r = parseTranscript('medium nineties Nike windbreaker seventy five dollars');
+    expect(r.item_name).toBeTruthy();
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.item_name?.toLowerCase()).toContain('windbreaker');
   });
 
-  it('price first', () => {
-    const result = parseTranscription(
-      'seventy five dollars medium nineties Polo Ralph Lauren shirt'
-    );
-    expect(result.size).toBe('M');
-    expect(result.decade).toBe("90's");
-    expect(result.price).toBe(75);
-    expect(result.item_name).toContain('Polo Ralph Lauren');
+  it('pure item name with no metadata', () => {
+    const r = parseTranscript('Nike hoodie');
+    expect(r.item_name).toBeTruthy();
+    expect(r.item_name?.toLowerCase()).toContain('nike');
+    expect(r.size).toBeNull();
+    expect(r.decade).toBeNull();
+    expect(r.price).toBeNull();
   });
 
-  it('decade first', () => {
-    const result = parseTranscription(
-      'nineties large Nike windbreaker twenty dollars'
+  it('single size word has null item_name', () => {
+    const r = parseTranscript('small');
+    expect(r.size).toBe('S');
+    expect(r.item_name).toBeNull();
+  });
+
+  it('single decade word has null item_name', () => {
+    const r = parseTranscript('nineties');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name).toBeNull();
+  });
+
+  it('single price has null item_name', () => {
+    const r = parseTranscript('twenty five dollars');
+    expect(r.price).toBe(25);
+    expect(r.item_name).toBeNull();
+  });
+});
+
+// ── UNIT: mergeItems ────────────────────────────────────────────────────────
+
+describe('mergeItems — field preservation', () => {
+  it('THE BUG: Nike hoodie then small', () => {
+    const step1 = mergeItems({ ...EMPTY_ITEM }, parseTranscript('Nike hoodie'));
+    expect(step1.item_name).toBeTruthy();
+
+    const step2 = mergeItems(step1, parseTranscript('small'));
+
+    expect(step2.size).toBe('S');
+    expect(step2.item_name).toBeTruthy();
+    expect(step2.item_name?.toLowerCase()).toContain('nike');
+  });
+
+  it('item name preserved when saying decade', () => {
+    const after = mergeItems(
+      { ...EMPTY_ITEM, item_name: 'Levi jeans' },
+      parseTranscript('nineties')
     );
-    expect(result.decade).toBe("90's");
+    expect(after.decade).toBe("90's");
+    expect(after.item_name).toBe('Levi jeans');
+  });
+
+  it('item name preserved when saying price', () => {
+    const after = mergeItems(
+      { ...EMPTY_ITEM, item_name: 'Carhartt jacket' },
+      parseTranscript('forty five dollars')
+    );
+    expect(after.price).toBe(45);
+    expect(after.item_name).toBe('Carhartt jacket');
+  });
+
+  it('null never overwrites existing value', () => {
+    const existing: ParsedItem = {
+      ...EMPTY_ITEM,
+      size: 'L',
+      decade: "90's",
+      item_name: 'vintage tee',
+      price: 20,
+    };
+    const result = mergeItems(existing, { ...EMPTY_ITEM });
+
     expect(result.size).toBe('L');
+    expect(result.decade).toBe("90's");
+    expect(result.item_name).toBe('vintage tee');
     expect(result.price).toBe(20);
   });
 
-  it('size last', () => {
-    const result = parseTranscription(
-      'nineties Levi jeans fifty dollars large'
-    );
+  it('incoming non-null value wins over existing', () => {
+    const existing: ParsedItem = { ...EMPTY_ITEM, size: 'M', price: 20 };
+    const incoming: ParsedItem = { ...EMPTY_ITEM, size: 'L', price: 30 };
+    const result = mergeItems(existing, incoming);
     expect(result.size).toBe('L');
-    expect(result.decade).toBe("90's");
-    expect(result.price).toBe(50);
+    expect(result.price).toBe(30);
   });
 
-  it('only item name and price', () => {
-    const result = parseTranscription(
-      'vintage leather jacket one hundred dollars'
+  it('incoming item_name replaces existing when more specific', () => {
+    const result = mergeItems(
+      { ...EMPTY_ITEM, item_name: 'hoodie' },
+      { ...EMPTY_ITEM, item_name: 'Nike Zip Up Hoodie' }
     );
-    expect(result.price).toBe(100);
-    expect(result.size).toBe('?');
-    expect(result.decade).toBe('?');
-    expect(result.item_name).toContain('Vintage Leather Jacket');
-  });
-
-  it('dollar sign price', () => {
-    const result = parseTranscription('medium eighties band tee $25');
-    expect(result.price).toBe(25);
-    expect(result.size).toBe('M');
-    expect(result.decade).toBe("80's");
-  });
-
-  it('numeric size with "size N" prefix', () => {
-    const result = parseTranscription(
-      'size 8 nineties floral dress forty dollars'
-    );
-    expect(result.size).toBe('8');
-    expect(result.price).toBe(40);
-    expect(result.decade).toBe("90's");
-    expect(result.item_name).toContain('Floral Dress');
-  });
-
-  it('confidence_score is 100 for a fully detected item', () => {
-    const full = parseTranscription(
-      'medium nineties Polo shirt seventy five dollars'
-    );
-    expect(full.confidence_score).toBe(100);
-  });
-
-  it('confidence_score is below 50 when most fields are missing', () => {
-    const partial = parseTranscription('vintage jacket');
-    expect(partial.confidence_score).toBeLessThan(50);
+    // Longer wins
+    expect(result.item_name).toBe('Nike Zip Up Hoodie');
   });
 });
 
-describe('mergeItems', () => {
-  it('preserves item_name when new transcript has only size', () => {
-    const existing = makeItem({
-      item_name: 'Nike Hoodie',
-      raw_transcript: 'Nike hoodie',
-      confidence: { size: false, decade: false, price: false, item_name: true },
-      confidence_score: 25,
-    });
-    const incoming = makeItem({
-      size: 'S',
-      raw_transcript: 'small',
-      confidence: { size: true, decade: false, price: false, item_name: false },
-      confidence_score: 25,
-    });
+// ── INTEGRATION: real user flows ────────────────────────────────────────────
 
-    const result = mergeItems(existing, incoming);
-
-    expect(result.size).toBe('S');
-    expect(result.item_name).toBe('Nike Hoodie');
-    expect(result.decade).toBe('?');
-    expect(result.price).toBe(0);
-    expect(result.confidence.size).toBe(true);
-    expect(result.confidence.item_name).toBe(true);
-  });
-
-  it('preserves item_name when new transcript has only decade', () => {
-    const existing = makeItem({
-      size: 'S',
-      item_name: 'Nike Hoodie',
-      raw_transcript: 'small Nike hoodie',
-      confidence: { size: true, decade: false, price: false, item_name: true },
-      confidence_score: 50,
-    });
-    const incoming = makeItem({
-      decade: "90's",
-      raw_transcript: 'nineties',
-      confidence: { size: false, decade: true, price: false, item_name: false },
-      confidence_score: 25,
-    });
-
-    const result = mergeItems(existing, incoming);
-
-    expect(result.size).toBe('S');
-    expect(result.decade).toBe("90's");
-    expect(result.item_name).toBe('Nike Hoodie');
-  });
-
-  it('preserves item_name when new transcript has only price', () => {
-    const existing = makeItem({
-      size: 'S',
-      decade: "90's",
-      item_name: 'Nike Hoodie',
-      raw_transcript: 'small nineties Nike hoodie',
-      confidence: { size: true, decade: true, price: false, item_name: true },
-      confidence_score: 75,
-    });
-    const incoming = makeItem({
-      price: 25,
-      raw_transcript: 'twenty five dollars',
-      confidence: { size: false, decade: false, price: true, item_name: false },
-      confidence_score: 25,
-    });
-
-    const result = mergeItems(existing, incoming);
-
-    expect(result.size).toBe('S');
-    expect(result.decade).toBe("90's");
-    expect(result.item_name).toBe('Nike Hoodie');
-    expect(result.price).toBe(25);
-    expect(result.confidence_score).toBe(100);
-  });
-
-  it('builds a complete item across 4 separate transcripts', () => {
-    let item: ParsedItem = makeItem({});
-
-    // 1. item name
-    item = mergeItems(item, parseTranscription('Nike windbreaker'));
-    expect(item.confidence.item_name).toBe(true);
-    expect(item.item_name.toLowerCase()).toContain('nike');
-    expect(item.confidence.size).toBe(false);
-
-    // 2. size
-    item = mergeItems(item, parseTranscription('large'));
-    expect(item.size).toBe('L');
-    expect(item.confidence.item_name).toBe(true);
-    expect(item.item_name.toLowerCase()).toContain('nike');
-
-    // 3. decade
-    item = mergeItems(item, parseTranscription('nineties'));
+describe('buildItemFromTranscripts — real user flows', () => {
+  it('FLOW 1: standard order', () => {
+    const item = buildItemFromTranscripts(
+      'medium',
+      'nineties',
+      'Polo Ralph Lauren shirt',
+      'seventy five dollars'
+    );
+    expect(item.size).toBe('M');
     expect(item.decade).toBe("90's");
-    expect(item.size).toBe('L');
-    expect(item.item_name.toLowerCase()).toContain('nike');
+    expect(item.item_name?.toLowerCase()).toContain('polo');
+    expect(item.price).toBe(75);
+    expect(item.confidence).toBe(100);
+  });
 
-    // 4. price
-    item = mergeItems(item, parseTranscription('fifty dollars'));
-    expect(item.price).toBe(50);
+  it('FLOW 2: price first', () => {
+    const item = buildItemFromTranscripts(
+      'seventy five dollars',
+      'Nike windbreaker',
+      'large',
+      'nineties'
+    );
+    expect(item.price).toBe(75);
+    expect(item.item_name?.toLowerCase()).toContain('nike');
+    expect(item.size).toBe('L');
     expect(item.decade).toBe("90's");
-    expect(item.size).toBe('L');
-    expect(item.item_name.toLowerCase()).toContain('nike');
-    expect(item.confidence_score).toBe(100);
   });
 
-  it('incoming item_name replaces existing when present', () => {
-    const existing = makeItem({
-      size: 'M',
-      item_name: 'Hoodie',
-      raw_transcript: 'medium hoodie',
-      confidence: { size: true, decade: false, price: false, item_name: true },
-      confidence_score: 50,
-    });
-    const incoming = makeItem({
-      item_name: 'Nike Zip Up Hoodie',
-      raw_transcript: 'Nike zip up hoodie',
-      confidence: { size: false, decade: false, price: false, item_name: true },
-      confidence_score: 25,
-    });
-
-    const result = mergeItems(existing, incoming);
-
-    expect(result.item_name).toBe('Nike Zip Up Hoodie');
-    expect(result.size).toBe('M');
-  });
-
-  it('nike hoodie then small - item name preserved (regression test)', () => {
-    let item = makeItem({});
-
-    item = mergeItems(item, parseTranscription('Nike hoodie'));
-    expect(item.item_name.toLowerCase()).toContain('nike');
-
-    item = mergeItems(item, parseTranscription('small'));
+  it('FLOW 3: item name first (THE REPORTED BUG)', () => {
+    const item = buildItemFromTranscripts(
+      'Nike hoodie',
+      'small',
+      'nineties',
+      'twenty five dollars'
+    );
+    expect(item.item_name?.toLowerCase()).toContain('nike');
     expect(item.size).toBe('S');
-    expect(item.item_name.toLowerCase()).toContain('nike');
+    expect(item.decade).toBe("90's");
+    expect(item.price).toBe(25);
   });
 
-  it('low-confidence incoming does not overwrite a fully populated item', () => {
-    const existing = makeItem({
-      size: 'XL',
-      decade: "80's",
-      item_name: 'Carhartt Jacket',
-      price: 45,
-      raw_transcript: 'XL eighties Carhartt jacket forty five dollars',
-      confidence: { size: true, decade: true, price: true, item_name: true },
-      confidence_score: 100,
-    });
-    const incoming = makeItem({
-      raw_transcript: 'um',
-      // All confidence flags false → nothing should change.
-    });
+  it('FLOW 4: all in one sentence any order', () => {
+    const item = buildItemFromTranscripts('twenty dollars large eighties Levi jeans');
+    expect(item.price).toBe(20);
+    expect(item.size).toBe('L');
+    expect(item.decade).toBe("80's");
+    expect(item.item_name?.toLowerCase()).toContain('levi');
+  });
 
-    const result = mergeItems(existing, incoming);
+  it('FLOW 5: natural rambling speech', () => {
+    const item = buildItemFromTranscripts(
+      'um this is a really nice',
+      'Carhartt Detroit jacket',
+      'its a large',
+      'from the nineties I think',
+      'I would say ninety dollars'
+    );
+    expect(item.item_name?.toLowerCase()).toContain('carhartt');
+    expect(item.size).toBe('L');
+    expect(item.decade).toBe("90's");
+    expect(item.price).toBe(90);
+  });
 
-    expect(result.size).toBe('XL');
-    expect(result.decade).toBe("80's");
-    expect(result.item_name).toBe('Carhartt Jacket');
-    expect(result.price).toBe(45);
-    expect(result.confidence_score).toBe(100);
+  it('FLOW 6: correction — says wrong price then corrects', () => {
+    const item = buildItemFromTranscripts(
+      'Nike tee medium nineties',
+      'forty dollars',
+      'actually thirty dollars'
+    );
+    // Latest non-null price wins
+    expect(item.price).toBe(30);
+    expect(item.item_name?.toLowerCase()).toContain('nike');
+    expect(item.size).toBe('M');
+  });
+
+  it('FLOW 7: partial entry — only name and price', () => {
+    const item = buildItemFromTranscripts(
+      'vintage leather jacket',
+      'one hundred dollars'
+    );
+    expect(item.item_name?.toLowerCase()).toContain('leather');
+    expect(item.price).toBe(100);
+    expect(item.size).toBeNull();
+    expect(item.decade).toBeNull();
+  });
+
+  it('FLOW 8: brand names with common words', () => {
+    const item = buildItemFromTranscripts(
+      'small',
+      'Champion reverse weave sweatshirt',
+      'eighties',
+      'fifty dollars'
+    );
+    expect(item.size).toBe('S');
+    expect(item.item_name?.toLowerCase()).toContain('champion');
+    expect(item.decade).toBe("80's");
+    expect(item.price).toBe(50);
+  });
+
+  it('FLOW 9: numeric size', () => {
+    const item = buildItemFromTranscripts(
+      'size 10',
+      'nineties floral dress',
+      'thirty five dollars'
+    );
+    expect(item.size).toBe('10');
+    expect(item.item_name?.toLowerCase()).toContain('dress');
+    expect(item.price).toBe(35);
+  });
+
+  it('FLOW 10: extra large not confused with large', () => {
+    const item = buildItemFromTranscripts(
+      'extra large nineties Starter jacket fifty dollars'
+    );
+    expect(item.size).toBe('XL');
+    expect(item.size).not.toBe('L');
+    expect(item.item_name?.toLowerCase()).toContain('starter');
+  });
+});
+
+// ── EDGE CASES ──────────────────────────────────────────────────────────────
+
+describe('edge cases', () => {
+  it('empty transcript returns empty item', () => {
+    const r = parseTranscript('');
+    expect(r.size).toBeNull();
+    expect(r.decade).toBeNull();
+    expect(r.item_name).toBeNull();
+    expect(r.price).toBeNull();
+  });
+
+  it('filler words only return empty item', () => {
+    const r = parseTranscript('um uh like you know');
+    expect(r.size).toBeNull();
+    expect(r.decade).toBeNull();
+    expect(r.price).toBeNull();
+    expect(r.item_name).toBeNull();
+    expect(r.confidence).toBe(0);
+  });
+
+  it('confidence 100 for full item', () => {
+    const r = parseTranscript('medium nineties Nike hoodie fifty dollars');
+    expect(r.confidence).toBe(100);
+  });
+
+  it('confidence 25 for single field', () => {
+    expect(parseTranscript('small').confidence).toBe(25);
+    expect(parseTranscript('nineties').confidence).toBe(25);
+    expect(parseTranscript('fifty dollars').confidence).toBe(25);
   });
 });

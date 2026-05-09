@@ -312,7 +312,7 @@ export default function RecordScreen() {
         const items = splitMultipleItems(transcript);
         for (const itemText of items) {
           const parsed = parseTranscription(itemText);
-          if (parsed.confidence.price) {
+          if (parsed.price !== null) {
             confirmItem(parsed);
           } else {
             // Incomplete — show as pending for manual confirm
@@ -329,7 +329,7 @@ export default function RecordScreen() {
         const currentItem = items[items.length - 1] || '';
         if (currentItem) {
           const parsed = parseTranscription(currentItem);
-          if (parsed.confidence.size || parsed.confidence.decade) {
+          if (parsed.size !== null || parsed.decade !== null) {
             setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
           }
         }
@@ -381,8 +381,8 @@ export default function RecordScreen() {
 
     const previousIsComplete =
       previous &&
-      previous.confidence.size &&
-      previous.confidence.price;
+      previous.size !== null &&
+      previous.price !== null;
 
     if (previousIsComplete) {
       confirmItem(previous!);
@@ -425,7 +425,7 @@ export default function RecordScreen() {
     setPendingItem(merged);
 
     const hasEnoughFields =
-      (merged.confidence.size || merged.confidence.decade) && merged.confidence.price;
+      (merged.size !== null || merged.decade !== null) && merged.price !== null;
 
     if (hasEnoughFields) {
       // Auto-confirm after delay (user can tap to confirm/edit sooner).
@@ -445,12 +445,15 @@ export default function RecordScreen() {
     }
 
     // Sanitize and validate FIRST — atomic guard against race conditions
-    // (prevents double-trigger from auto-confirm + manual confirm)
+    // (prevents double-trigger from auto-confirm + manual confirm).
+    // Null fields fall through to placeholders that validation flags as
+    // warnings/errors; an item with item_name === null fails validation.
     const sanitized = {
-      ...item,
-      size: sanitizeField(item.size),
-      decade: sanitizeField(item.decade),
-      item_name: sanitizeField(item.item_name),
+      size: sanitizeField(item.size ?? '?'),
+      decade: sanitizeField(item.decade ?? '?'),
+      item_name: sanitizeField(item.item_name ?? ''),
+      price: item.price ?? 0,
+      raw_title: sanitizeField(item.raw_title),
     };
 
     const validation = validateItem(sanitized);
@@ -479,7 +482,15 @@ export default function RecordScreen() {
       });
 
       recentItemTimestamps.current.push(Date.now());
-      setLoggedItems((prev) => [...prev, { parsed: sanitized, id }]);
+      const persisted: ParsedItem = {
+        ...item,
+        size: sanitized.size,
+        decade: sanitized.decade,
+        item_name: sanitized.item_name,
+        price: sanitized.price,
+        raw_title: sanitized.raw_title,
+      };
+      setLoggedItems((prev) => [...prev, { parsed: persisted, id }]);
       pendingItemRef.current = null;
       setPendingItem(null);
       setLiveTranscript('');
@@ -527,7 +538,7 @@ export default function RecordScreen() {
   }
 
   // --- Render ---
-  const totalValue = loggedItems.reduce((sum, i) => sum + i.parsed.price, 0);
+  const totalValue = loggedItems.reduce((sum, i) => sum + (i.parsed.price ?? 0), 0);
 
   // Status label is derived from the native recording phase on iOS/Android,
   // and from local listening flags on web.
@@ -657,7 +668,7 @@ export default function RecordScreen() {
           <View style={styles.previewHeader}>
             <Text style={styles.previewLabel}>PREVIEW</Text>
             <View style={styles.previewHeaderRight}>
-              {pendingItem.confidence.size && pendingItem.confidence.price && (
+              {pendingItem.size !== null && pendingItem.price !== null && (
                 <Text style={styles.autoConfirmHint}>Auto-confirming...</Text>
               )}
               <TouchableOpacity
@@ -668,7 +679,7 @@ export default function RecordScreen() {
               </TouchableOpacity>
             </View>
           </View>
-          {pendingItem.confidence_score < 50 && (
+          {pendingItem.confidence < 50 && (
             <View style={styles.lowConfidenceWarning}>
               <Text style={styles.warningText}>
                 Some fields could not be detected. Please review and edit before confirming.
@@ -678,7 +689,11 @@ export default function RecordScreen() {
           <ItemPreviewCard
             item={{
               id: '',
-              ...pendingItem,
+              size: pendingItem.size ?? '?',
+              decade: pendingItem.decade ?? '?',
+              item_name: pendingItem.item_name ?? 'Unknown Item',
+              price: pendingItem.price ?? 0,
+              raw_title: pendingItem.raw_title,
               session_id: sessionId || '',
               logged_at: new Date().toISOString(),
             }}
@@ -686,7 +701,7 @@ export default function RecordScreen() {
             onCancel={discardPending}
             rawTranscript={pendingItem.raw_transcript}
           />
-          {pendingItem.confidence_score < 50 && !recording && (
+          {pendingItem.confidence < 50 && !recording && (
             <View style={styles.retryRow}>
               <TouchableOpacity
                 style={styles.retryButton}
@@ -735,7 +750,7 @@ export default function RecordScreen() {
                 <Text style={styles.feedName} numberOfLines={1}>
                   {item.parsed.raw_title}
                 </Text>
-                <Text style={styles.feedPrice}>${item.parsed.price.toFixed(2)}</Text>
+                <Text style={styles.feedPrice}>${(item.parsed.price ?? 0).toFixed(2)}</Text>
               </View>
             </View>
           ))}
