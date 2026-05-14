@@ -454,6 +454,85 @@ function stripFillers(words: string[]): string[] {
   });
 }
 
+// ─── Mishear corrections for known keyterm brands ────────────────────────────
+//
+// Even with keyterm biasing in place, ElevenLabs occasionally mishears the
+// brands we care most about (especially over noisy mic pipelines like
+// WSL2's). This map rewrites observed mishears back to the correct brand
+// before parsing — last-resort defense after keyterms.
+//
+// Rules:
+//   - Patterns use `\b` word boundaries so partial-word matches are avoided.
+//   - "hello → Polo" only fires with garment context to avoid corrupting
+//     normal sentences.
+//   - The "wrangler" entry uses `\brangler\b` only — `wrangler` already
+//     contains a word boundary before "wrangler", so "wrangler" itself won't
+//     re-match. (\brangler\b cannot match inside "wrangler" because the
+//     position between "w" and "r" is not a word boundary.)
+
+const MISHEAR_CORRECTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  // Carhartt
+  [/\bcardwear\b/gi, 'Carhartt'],
+  [/\bcarhart\b/gi, 'Carhartt'],
+  [/\bcar hard\b/gi, 'Carhartt'],
+  [/\bcar heart\b/gi, 'Carhartt'],
+  [/\bcar note\b/gi, 'Carhartt'],
+  [/\bcar park\b/gi, 'Carhartt'],
+  [/\bsarver\b/gi, 'Carhartt'],
+  [/\bkar hard\b/gi, 'Carhartt'],
+  // Woolrich
+  [/\bwool rich\b/gi, 'Woolrich'],
+  [/\bwoolwich\b/gi, 'Woolrich'],
+  // Patagonia
+  [/\bpat a gonia\b/gi, 'Patagonia'],
+  // Wrangler — match "rangler" alone (a leading "w" already provides the
+  // boundary for the canonical spelling, so "wrangler" itself is safe).
+  [/\brangler\b/gi, 'Wrangler'],
+  // Polo — only when followed by a garment word, otherwise "hello" stays.
+  [/\bhello\b(?=\s+(?:jacket|shirt|polo|sweater|vest|coat))/gi, 'Polo'],
+];
+
+export function correctMishears(text: string): string {
+  let corrected = text;
+  for (const [pattern, replacement] of MISHEAR_CORRECTIONS) {
+    corrected = corrected.replace(pattern, replacement);
+  }
+  return corrected;
+}
+
+/**
+ * Collapse exact-duplicated committed transcripts.
+ *
+ * Background: when audio was sent both as streamed chunks (commit:false) AND
+ * again in the final commit:true message, ElevenLabs returned the full text
+ * twice ("X. X."). The audio pipeline now avoids that by sending only the
+ * unsent leftover in commit:true, but this helper stays as defense-in-depth.
+ *
+ * Conservative: only collapse when the text splits into 2+ sentences and
+ * ALL sentences are identical (case-insensitive). Mixed repetition is left
+ * untouched — real inventory utterances might legitimately repeat a brand
+ * ("Carhartt Carhartt jacket") and we don't want to mangle those.
+ */
+export function dedupeCommittedTranscript(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return trimmed;
+
+  const sentences = trimmed
+    .split(/[.!?]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (sentences.length < 2) return trimmed;
+
+  const first = sentences[0].toLowerCase();
+  const allEqualToFirst = sentences.every((s) => s.toLowerCase() === first);
+  if (allEqualToFirst) {
+    return sentences[0];
+  }
+
+  return trimmed;
+}
+
 // ─── Top-level transcript parsers ────────────────────────────────────────────
 
 const MAX_TRANSCRIPT_LENGTH = 1000;
@@ -477,9 +556,22 @@ const MAX_TRANSCRIPT_LENGTH = 1000;
 export function parseTranscript(transcript: string): ParsedItem {
   const sanitized = transcript.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
-  const truncated = sanitized.length > MAX_TRANSCRIPT_LENGTH
-    ? sanitized.slice(0, MAX_TRANSCRIPT_LENGTH)
-    : sanitized;
+  // Apply known-mishear corrections (Carhartt, Patagonia, Woolrich, …)
+  // before any other processing. Log when something changed so the
+  // pipeline is observable in device logs.
+  const mishearCorrected = correctMishears(sanitized);
+  if (mishearCorrected !== sanitized) {
+    console.log(
+      '[CORRECT] Mishear fixed:',
+      JSON.stringify(sanitized),
+      '→',
+      JSON.stringify(mishearCorrected)
+    );
+  }
+
+  const truncated = mishearCorrected.length > MAX_TRANSCRIPT_LENGTH
+    ? mishearCorrected.slice(0, MAX_TRANSCRIPT_LENGTH)
+    : mishearCorrected;
 
   const cleaned = truncated.replace(/\s+/g, ' ').trim();
 

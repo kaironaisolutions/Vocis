@@ -7,6 +7,8 @@ import {
   parseDecade,
   isValidTranscript,
   formatRawTitle,
+  correctMishears,
+  dedupeCommittedTranscript,
   ParsedItem,
 } from '../services/voiceParser';
 
@@ -967,5 +969,96 @@ describe('decade-shaped tokens must not leak into item_name', () => {
     expect(r.decade).toBe("80's");
     expect(r.item_name?.toLowerCase()).toContain('carhartt');
     expect(r.item_name).not.toMatch(/80/);
+  });
+});
+
+// ── MISHEAR CORRECTIONS ─────────────────────────────────────────────────────
+//
+// Even with keyterms in the WebSocket session config, ElevenLabs occasionally
+// returns mishears for the brands we care about. correctMishears() rewrites
+// known mishears to the canonical brand BEFORE parsing.
+
+describe('correctMishears', () => {
+  it('rewrites Carhartt mishears', () => {
+    expect(correctMishears('Large Nikes cardwear jacket')).toBe(
+      'Large Nikes Carhartt jacket'
+    );
+    expect(correctMishears('a carhart shirt')).toBe('a Carhartt shirt');
+    expect(correctMishears("It's a car heart coat")).toBe(
+      "It's a Carhartt coat"
+    );
+    expect(correctMishears('sarver jacket')).toBe('Carhartt jacket');
+  });
+
+  it('rewrites Woolrich mishears', () => {
+    expect(correctMishears('vintage wool rich flannel')).toBe(
+      'vintage Woolrich flannel'
+    );
+    expect(correctMishears('woolwich shirt')).toBe('Woolrich shirt');
+  });
+
+  it('rewrites Wrangler "rangler" fragment without breaking "wrangler"', () => {
+    expect(correctMishears('rangler jeans')).toBe('Wrangler jeans');
+    // Canonical spelling must be left alone — no double-correction.
+    expect(correctMishears('Wrangler jeans')).toBe('Wrangler jeans');
+  });
+
+  it('Polo only fires with garment context', () => {
+    // Bare "hello" stays — it's a real word.
+    expect(correctMishears('hello there')).toBe('hello there');
+    // With garment context, becomes Polo.
+    expect(correctMishears('hello shirt')).toBe('Polo shirt');
+    expect(correctMishears('hello jacket')).toBe('Polo jacket');
+  });
+
+  it('integration: parseTranscript runs correction first', () => {
+    const r = parseTranscript('large cardwear jacket forty dollars');
+    expect(r.size).toBe('L');
+    expect(r.price).toBe(40);
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+  });
+});
+
+// ── COMMITTED-TRANSCRIPT DEDUP ──────────────────────────────────────────────
+//
+// Doubled transcripts ("X. X.") came from sending audio twice. The audio
+// pipeline now sends only the leftover chunk in commit:true so the bug is
+// fixed at the source, but the dedup helper stays as defense-in-depth.
+
+describe('dedupeCommittedTranscript', () => {
+  it('collapses exact two-sentence duplicate', () => {
+    expect(
+      dedupeCommittedTranscript(
+        "Large Nike's cardwear jacket. Large Nike's cardwear jacket."
+      )
+    ).toBe("Large Nike's cardwear jacket");
+  });
+
+  it('collapses case-insensitive duplicate', () => {
+    expect(
+      dedupeCommittedTranscript('Carhartt jacket. CARHARTT JACKET.')
+    ).toBe('Carhartt jacket');
+  });
+
+  it('collapses 3x repetition', () => {
+    expect(
+      dedupeCommittedTranscript('Hat. Hat. Hat.')
+    ).toBe('Hat');
+  });
+
+  it('leaves legitimate multi-sentence transcripts untouched', () => {
+    const input = 'Large Carhartt jacket. Small Nike hat.';
+    expect(dedupeCommittedTranscript(input)).toBe(input);
+  });
+
+  it('leaves single-sentence transcripts untouched', () => {
+    expect(dedupeCommittedTranscript('Large Carhartt jacket')).toBe(
+      'Large Carhartt jacket'
+    );
+  });
+
+  it('handles empty / whitespace-only input', () => {
+    expect(dedupeCommittedTranscript('')).toBe('');
+    expect(dedupeCommittedTranscript('   ')).toBe('');
   });
 });

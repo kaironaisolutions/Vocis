@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SecureStorage } from './secureStorage';
 import { STTProxy } from './sttProxy';
-import { isValidTranscript } from './voiceParser';
+import { isValidTranscript, dedupeCommittedTranscript } from './voiceParser';
 
 const ELEVENLABS_STT_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
@@ -350,15 +350,19 @@ export class ElevenLabsSTTService {
         if (typeof data.text === 'string' && data.text.trim()) {
           console.log('═══════════════════════════════');
           console.log('[RAW] ElevenLabs heard:', JSON.stringify(data.text));
+          const deduped = dedupeCommittedTranscript(data.text);
+          if (deduped !== data.text) {
+            console.log('[DEDUP] Collapsed →', JSON.stringify(deduped));
+          }
           // Drop streaming fragments ("'9", "90", "1930", ",300") before
           // they touch parser state.
-          if (!isValidTranscript(data.text)) {
-            console.log('[FILTER] Skipped fragment:', JSON.stringify(data.text));
+          if (!isValidTranscript(deduped)) {
+            console.log('[FILTER] Skipped fragment:', JSON.stringify(deduped));
             console.log('═══════════════════════════════');
             break;
           }
           console.log('═══════════════════════════════');
-          this.callbacks.onTranscript({ type: 'final', text: data.text });
+          this.callbacks.onTranscript({ type: 'final', text: deduped });
         }
         break;
       case 'commit_throttled':

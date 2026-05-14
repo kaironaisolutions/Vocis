@@ -372,31 +372,47 @@ export function useRecording(): UseRecordingResult {
 
     if (sttService.current && collectedSampleCount.current > 0) {
       try {
-        const total = collectedSampleCount.current;
-        const combined = new Float32Array(total);
-        let offset = 0;
-        for (const buf of collectedSamples.current) {
-          combined.set(buf, offset);
-          offset += buf.length;
-        }
-        const durationSecs = combined.length / TARGET_SAMPLE_RATE;
+        const durationSecs = collectedSampleCount.current / TARGET_SAMPLE_RATE;
         console.log(
-          '[Recording] PCM samples:',
-          combined.length,
+          '[Recording] Total PCM samples:',
+          collectedSampleCount.current,
           '— duration:',
           durationSecs.toFixed(2),
-          's'
+          's',
+          '— leftover (unsent) samples:',
+          unsentSampleCount.current
         );
 
-        if (combined.length < MIN_RECORDING_SAMPLES) {
+        if (collectedSampleCount.current < MIN_RECORDING_SAMPLES) {
           console.warn('[Recording] Audio too short — skipping');
           setError('Recording too short. Please speak for at least 1 second.');
         } else {
-          const pcmBytes = float32ToPcm16Bytes(combined);
-          const pcmBase64 = bytesToBase64(pcmBytes);
-          console.log('[Recording] Sending PCM base64 length:', pcmBase64.length);
-          sttService.current.sendFinalAudio(pcmBase64);
-          console.log('[Recording] PCM audio sent, waiting for transcript…');
+          // Send ONLY the leftover chunk (samples accumulated since the last
+          // streaming drain) with commit:true. ElevenLabs accumulates the
+          // streamed chunks server-side; sending the full session here too
+          // would double-feed the audio and produce a duplicated transcript
+          // ("X. X."). The commit:true on this final chunk tells the server
+          // to finalize the accumulated buffer.
+          if (unsentSampleCount.current > 0) {
+            const leftover = new Float32Array(unsentSampleCount.current);
+            let offset = 0;
+            for (const buf of unsentSamples.current) {
+              leftover.set(buf, offset);
+              offset += buf.length;
+            }
+            const pcmBase64 = bytesToBase64(float32ToPcm16Bytes(leftover));
+            console.log(
+              '[Recording] Sending final leftover chunk, base64 length:',
+              pcmBase64.length
+            );
+            sttService.current.sendFinalAudio(pcmBase64);
+          } else {
+            // Nothing left to send — commit with empty audio to finalize
+            // the already-streamed buffer.
+            console.log('[Recording] No leftover — flushing empty commit');
+            sttService.current.flush();
+          }
+          console.log('[Recording] Waiting for transcript…');
         }
       } catch (err) {
         console.error('[Recording] Failed to encode audio:', err);

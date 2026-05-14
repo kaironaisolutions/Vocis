@@ -345,6 +345,15 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     try { upstream.close(1000, 'Client disconnected'); } catch { /* already closed */ }
   });
 
+  // Without this, an abrupt client disconnect (TCP reset, browser tab killed
+  // mid-recording, mobile network drop) leaves upstream open and the
+  // request alive until Cloudflare's hard timeout fires the "code had hung"
+  // error. Mirror the upstream-error path: close the other side cleanly.
+  server.addEventListener('error', (err) => {
+    console.error('[WS] Client WS error:', err);
+    try { upstream.close(1011, 'Client error'); } catch { /* already closed */ }
+  });
+
   // ElevenLabs → app: forward transcript responses directly.
   // Log the *first* message in full so we can see whether ElevenLabs
   // echoed the keyterms back in session_started.config (per docs).
