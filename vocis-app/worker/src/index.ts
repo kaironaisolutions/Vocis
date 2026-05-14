@@ -92,7 +92,7 @@ const PRIORITY_KEYTERMS: readonly string[] = [
 const deviceUsage = new Map<string, { hourly: number[]; daily: { date: string; count: number } }>();
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Fail immediately if required secrets are not configured.
     // Without TOKEN_SECRET the HMAC is meaningless (tokens are unforgeable only with it).
     if (!env.TOKEN_SECRET) {
@@ -152,7 +152,7 @@ export default {
     if (url.pathname === '/stream') {
       const upgradeHeader = request.headers.get('Upgrade');
       if (upgradeHeader?.toLowerCase() === 'websocket') {
-        return handleWebSocket(request, env);
+        return handleWebSocket(request, env, ctx);
       }
       return new Response('Expected WebSocket upgrade.', { status: 426 });
     }
@@ -238,10 +238,22 @@ async function handleTokenRequest(
 
 /**
  * WSS /stream?token=xxx — WebSocket proxy to ElevenLabs.
- * Validates the HMAC-signed session token (stateless, works across isolates),
- * then relays audio/transcripts bidirectionally.
+ *
+ * Validates the HMAC-signed session token, then creates the client-facing
+ * WebSocketPair synchronously and returns the 101 Response immediately.
+ * The upstream ElevenLabs connection + bidirectional proxying happens in
+ * a `ctx.waitUntil` background task so Cloudflare doesn't flag the
+ * request as a hung invocation while audio streams for minutes.
+ *
+ * Messages received from the client BEFORE the upstream connects (~200-500ms
+ * fetch round-trip) are queued in `earlyMessages` and replayed once
+ * upstream is ready, so leading audio chunks aren't lost.
  */
-async function handleWebSocket(request: Request, env: Env): Promise<Response> {
+async function handleWebSocket(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
   const url = new URL(request.url);
   const token = url.searchParams.get('token');
 
@@ -255,138 +267,182 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
     return new Response('Invalid or expired token.', { status: 401 });
   }
 
-  // Connect to ElevenLabs BEFORE accepting the client WebSocket.
-  // CF Workers fetch() only accepts https:// — wss:// throws TypeError.
-  // Forward config query params (model_id, language_code, sample_rate) from
-  // the client request to ElevenLabs so the app controls session parameters.
-  const elevenLabsUrl = new URL('https://api.elevenlabs.io/v1/speech-to-text/realtime');
-  const forwardParams = ['model_id', 'language_code', 'sample_rate'];
-  for (const param of forwardParams) {
-    const value = url.searchParams.get(param);
-    if (value) elevenLabsUrl.searchParams.set(param, value);
-  }
-
-  // Keyterm biasing — repeated `keyterms=` query parameters per the
-  // ElevenLabs Scribe v2 Realtime spec. Filter to comply with the
-  // documented limits (≤50 entries, ≤20 chars each).
-  const validKeyterms = PRIORITY_KEYTERMS.filter((k) => k.length <= 20).slice(0, 50);
-  for (const term of validKeyterms) {
-    elevenLabsUrl.searchParams.append('keyterms', term);
-  }
-
-  // no_verbatim removes filler words ("um", "uh", "like", "you know")
-  // from transcripts before they reach us, which means they never
-  // pollute the parser's item-name extraction.
-  elevenLabsUrl.searchParams.set('no_verbatim', 'true');
-
-  // Diagnostic: dump enough of the upstream URL to confirm keyterms
-  // are present (search for "keyterms=" in `wrangler tail` output).
-  // Truncated to 300 chars so the log stays readable.
-  const upstreamUrlString = elevenLabsUrl.toString();
-  console.log('[WS] Keyterms in URL:', validKeyterms.length, validKeyterms.slice(0, 5).join(','));
-  console.log('[WS] Upstream URL (first 300):', upstreamUrlString.slice(0, 300));
-  console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
-
-  let elevenLabsResp: Response;
-  try {
-    elevenLabsResp = await fetch(upstreamUrlString, {
-      headers: {
-        'Upgrade': 'websocket',
-        'Connection': 'Upgrade',
-        'xi-api-key': env.ELEVENLABS_API_KEY,
-      },
-    });
-    console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
-  } catch (e) {
-    console.error('[WS] ElevenLabs fetch threw:', e);
-    return new Response('ElevenLabs fetch failed.', { status: 502 });
-  }
-
-  const upstream = elevenLabsResp.webSocket;
-
-  if (!upstream) {
-    console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status}`);
-    const [clientErr, serverErr] = Object.values(new WebSocketPair());
-    serverErr.accept();
-    serverErr.close(1011, 'Upstream connection error');
-    return new Response(null, { status: 101, webSocket: clientErr });
-  }
-
-  upstream.accept();
-  console.log('[WS] ElevenLabs Scribe v2 Realtime connected ✅');
-
-  // Now accept the client WebSocket
+  // Create client/server pair and accept the server side synchronously so
+  // the 101 Response with the client side can be returned immediately.
   const [client, server] = Object.values(new WebSocketPair());
   server.accept();
-  console.log('[WS] Client WebSocket accepted');
+  console.log('[WS] Client WebSocket accepted (upstream pending)');
 
-  // Pure pass-through: the app sends correctly-formatted Scribe v2 Realtime
-  // messages — no transformation needed in the Worker.
-  server.addEventListener('message', (event) => {
-    try {
-      if (typeof event.data === 'string') {
-        try {
-          const msg = JSON.parse(event.data) as Record<string, unknown>;
-          console.log(
-            '[WS] → ElevenLabs message_type:', msg.message_type,
-            '| audio_base_64 length:', typeof msg.audio_base_64 === 'string' ? msg.audio_base_64.length : 0,
-            '| commit:', msg.commit
-          );
-        } catch { /* non-JSON, forward anyway */ }
-      }
-      upstream.send(event.data);
-    } catch (e) {
-      console.error('[WS] upstream.send failed:', e);
-    }
-  });
+  // Run the upstream connection + bidirectional proxy in the background.
+  // waitUntil keeps the worker isolate alive until the returned promise
+  // resolves (when both sides close). The Response is already returned by
+  // then, so Cloudflare doesn't think the request hung.
+  ctx.waitUntil(proxyClientToElevenLabs(server, url, env));
 
-  server.addEventListener('close', () => {
-    console.log('[WS] Client disconnected');
-    try { upstream.close(1000, 'Client disconnected'); } catch { /* already closed */ }
-  });
+  return new Response(null, { status: 101, webSocket: client });
+}
 
-  // Without this, an abrupt client disconnect (TCP reset, browser tab killed
-  // mid-recording, mobile network drop) leaves upstream open and the
-  // request alive until Cloudflare's hard timeout fires the "code had hung"
-  // error. Mirror the upstream-error path: close the other side cleanly.
-  server.addEventListener('error', (err) => {
-    console.error('[WS] Client WS error:', err);
-    try { upstream.close(1011, 'Client error'); } catch { /* already closed */ }
-  });
+/**
+ * Bidirectional WebSocket proxy: client server-side ↔ ElevenLabs.
+ *
+ * Resolves when both sides have closed. Buffers client messages received
+ * before the upstream fetch returns so no early audio chunks are dropped.
+ */
+function proxyClientToElevenLabs(
+  server: WebSocket,
+  requestUrl: URL,
+  env: Env
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let upstream: WebSocket | null = null;
+    let upstreamReady = false;
+    let firstUpstreamMessage = true;
+    let settled = false;
+    const earlyMessages: (string | ArrayBuffer)[] = [];
 
-  // ElevenLabs → app: forward transcript responses directly.
-  // Log the *first* message in full so we can see whether ElevenLabs
-  // echoed the keyterms back in session_started.config (per docs).
-  let firstUpstreamMessage = true;
-  upstream.addEventListener('message', (event: MessageEvent) => {
-    try {
-      if (typeof event.data === 'string') {
-        if (firstUpstreamMessage) {
-          firstUpstreamMessage = false;
-          console.log('[WS] ElevenLabs FIRST message (full):', event.data);
-        } else {
-          console.log('[WS] ElevenLabs →', event.data.slice(0, 120));
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    // Client → upstream (or buffer until upstream is ready).
+    server.addEventListener('message', (event) => {
+      const data = event.data;
+      try {
+        if (typeof data === 'string') {
+          try {
+            const msg = JSON.parse(data) as Record<string, unknown>;
+            console.log(
+              '[WS] → ElevenLabs message_type:', msg.message_type,
+              '| audio_base_64 length:', typeof msg.audio_base_64 === 'string' ? msg.audio_base_64.length : 0,
+              '| commit:', msg.commit
+            );
+          } catch { /* non-JSON, forward anyway */ }
         }
+        if (!upstreamReady || !upstream) {
+          earlyMessages.push(data);
+          return;
+        }
+        upstream.send(data);
+      } catch (e) {
+        console.error('[WS] upstream.send failed:', e);
       }
-      server.send(event.data);
-    } catch {
-      // Client may have disconnected
-    }
-  });
+    });
 
-  upstream.addEventListener('close', (event: CloseEvent) => {
-    console.log(`[WS] ElevenLabs closed: code=${event.code} reason=${event.reason}`);
-    try { server.close(event.code || 1000, event.reason || 'Upstream closed'); } catch { /* already closed */ }
-  });
+    server.addEventListener('close', () => {
+      console.log('[WS] Client disconnected');
+      try { upstream?.close(1000, 'Client disconnected'); } catch { /* already closed */ }
+      finish();
+    });
 
-  upstream.addEventListener('error', (err) => {
-    console.error('[WS] ElevenLabs error:', err);
-    try { server.close(1011, 'Upstream error'); } catch { /* already closed */ }
-  });
+    // Without this, an abrupt client disconnect (TCP reset, browser tab
+    // killed mid-recording, mobile network drop) leaves upstream open and
+    // the proxy promise unresolved. Mirror the upstream-error path.
+    server.addEventListener('error', (err) => {
+      console.error('[WS] Client WS error:', err);
+      try { upstream?.close(1011, 'Client error'); } catch { /* already closed */ }
+      finish();
+    });
 
-  return new Response(null, {
-    status: 101,
-    webSocket: client,
+    // Connect upstream asynchronously. The Promise this function returns
+    // does NOT await this — event listeners drive completion via finish().
+    (async () => {
+      // Build the upstream URL. CF Workers fetch() only accepts https:// —
+      // wss:// throws TypeError. Forward config query params from the
+      // client request so the app controls session parameters.
+      const elevenLabsUrl = new URL('https://api.elevenlabs.io/v1/speech-to-text/realtime');
+      const forwardParams = ['model_id', 'language_code', 'sample_rate'];
+      for (const param of forwardParams) {
+        const value = requestUrl.searchParams.get(param);
+        if (value) elevenLabsUrl.searchParams.set(param, value);
+      }
+
+      // Keyterm biasing — repeated `keyterms=` query parameters per the
+      // ElevenLabs Scribe v2 Realtime spec. ≤50 entries, ≤20 chars each.
+      const validKeyterms = PRIORITY_KEYTERMS.filter((k) => k.length <= 20).slice(0, 50);
+      for (const term of validKeyterms) {
+        elevenLabsUrl.searchParams.append('keyterms', term);
+      }
+      // no_verbatim drops filler words server-side ("um", "uh", "like").
+      elevenLabsUrl.searchParams.set('no_verbatim', 'true');
+
+      const upstreamUrlString = elevenLabsUrl.toString();
+      console.log('[WS] Keyterms in URL:', validKeyterms.length, validKeyterms.slice(0, 5).join(','));
+      console.log('[WS] Upstream URL (first 300):', upstreamUrlString.slice(0, 300));
+      console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
+
+      let elevenLabsResp: Response;
+      try {
+        elevenLabsResp = await fetch(upstreamUrlString, {
+          headers: {
+            'Upgrade': 'websocket',
+            'Connection': 'Upgrade',
+            'xi-api-key': env.ELEVENLABS_API_KEY,
+          },
+        });
+        console.log('[WS] ElevenLabs fetch status:', elevenLabsResp.status, '— has webSocket:', !!elevenLabsResp.webSocket);
+      } catch (e) {
+        console.error('[WS] ElevenLabs fetch threw:', e);
+        try { server.close(1011, 'Upstream connect failed'); } catch {}
+        finish();
+        return;
+      }
+
+      const ws = elevenLabsResp.webSocket;
+      if (!ws) {
+        console.error(`[WS] ElevenLabs rejected connection — HTTP ${elevenLabsResp.status}`);
+        try { server.close(1011, 'Upstream connection error'); } catch {}
+        finish();
+        return;
+      }
+
+      ws.accept();
+      upstream = ws;
+      console.log('[WS] ElevenLabs Scribe v2 Realtime connected ✅');
+
+      // Upstream → client: forward transcripts. Log the *first* message
+      // in full to verify keyterms came back in session_started.config.
+      upstream.addEventListener('message', (event: MessageEvent) => {
+        try {
+          if (typeof event.data === 'string') {
+            if (firstUpstreamMessage) {
+              firstUpstreamMessage = false;
+              console.log('[WS] ElevenLabs FIRST message (full):', event.data);
+            } else {
+              console.log('[WS] ElevenLabs →', event.data.slice(0, 120));
+            }
+          }
+          server.send(event.data);
+        } catch {
+          // Client may have disconnected
+        }
+      });
+
+      upstream.addEventListener('close', (event: CloseEvent) => {
+        console.log(`[WS] ElevenLabs closed: code=${event.code} reason=${event.reason}`);
+        try { server.close(event.code || 1000, event.reason || 'Upstream closed'); } catch { /* already closed */ }
+        finish();
+      });
+
+      upstream.addEventListener('error', (err) => {
+        console.error('[WS] ElevenLabs error:', err);
+        try { server.close(1011, 'Upstream error'); } catch { /* already closed */ }
+        finish();
+      });
+
+      // Drain queued client messages now that upstream is ready. Without
+      // this, the first ~200ms of audio (the chunks sent while the
+      // upstream fetch was in flight) would be lost.
+      upstreamReady = true;
+      if (earlyMessages.length > 0) {
+        console.log('[WS] Replaying', earlyMessages.length, 'buffered client messages');
+        for (const msg of earlyMessages) {
+          try { upstream.send(msg); } catch (e) { console.error('[WS] replay failed:', e); }
+        }
+        earlyMessages.length = 0;
+      }
+    })();
   });
 }
 

@@ -346,25 +346,35 @@ export class ElevenLabsSTTService {
           this.callbacks.onTranscript({ type: 'partial', text: data.text });
         }
         break;
-      case 'committed_transcript':
-        if (typeof data.text === 'string' && data.text.trim()) {
-          console.log('═══════════════════════════════');
-          console.log('[RAW] ElevenLabs heard:', JSON.stringify(data.text));
-          const deduped = dedupeCommittedTranscript(data.text);
-          if (deduped !== data.text) {
-            console.log('[DEDUP] Collapsed →', JSON.stringify(deduped));
-          }
-          // Drop streaming fragments ("'9", "90", "1930", ",300") before
-          // they touch parser state.
-          if (!isValidTranscript(deduped)) {
-            console.log('[FILTER] Skipped fragment:', JSON.stringify(deduped));
-            console.log('═══════════════════════════════');
-            break;
-          }
-          console.log('═══════════════════════════════');
-          this.callbacks.onTranscript({ type: 'final', text: deduped });
+      case 'committed_transcript': {
+        const text = typeof data.text === 'string' ? data.text.trim() : '';
+        if (text.length === 0) {
+          // ElevenLabs occasionally emits committed_transcript with an empty
+          // text payload — typically when commit:true fires on a buffer
+          // that contained only silence. Already-handled by validation
+          // upstream, but logged here for visibility in `wrangler tail`
+          // (matches the "[STT] Empty transcript — ignoring" line resellers
+          // sometimes see when they pause mid-pile).
+          console.log('[STT] Empty committed_transcript — ignoring');
+          break;
         }
+        console.log('═══════════════════════════════');
+        console.log('[RAW] ElevenLabs heard:', JSON.stringify(text));
+        const deduped = dedupeCommittedTranscript(text);
+        if (deduped !== text) {
+          console.log('[DEDUP] Collapsed →', JSON.stringify(deduped));
+        }
+        // Drop streaming fragments ("'9", "90", "1930", ",300") before
+        // they touch parser state.
+        if (!isValidTranscript(deduped)) {
+          console.log('[FILTER] Skipped fragment:', JSON.stringify(deduped));
+          console.log('═══════════════════════════════');
+          break;
+        }
+        console.log('═══════════════════════════════');
+        this.callbacks.onTranscript({ type: 'final', text: deduped });
         break;
+      }
       case 'commit_throttled':
         // Sent when commit:true arrives but ElevenLabs has received <1s of audio.
         console.warn('[STT] commit_throttled — not enough audio was sent');
