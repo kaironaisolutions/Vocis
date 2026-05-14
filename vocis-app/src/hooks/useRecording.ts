@@ -38,11 +38,16 @@ export interface UseRecordingResult {
 const TARGET_SAMPLE_RATE = 16000;
 const SILENCE_THRESHOLD_DB = -40;
 const SPEECH_START_THRESHOLD_DB = -25;
-// Per-item commit threshold: 8 seconds of silence after speech triggers a
+// Per-item commit threshold: 2.5 seconds of silence after speech triggers
 // commit:true (saves the current utterance) but does NOT tear down the
 // recording session. The audio context and WebSocket stay alive so the
 // user can keep speaking — pick up next garment, talk, pause, repeat.
-const COMMIT_SILENCE_MS = 8000;
+//
+// Why 2.5s and not the earlier 8s: 8s was the spec value but every item
+// auto-saved 8+ seconds after the user finished speaking it, which felt
+// broken. 2.5s gives natural-pause headroom (longer than a normal
+// inter-word gap) while keeping per-item feedback snappy.
+const COMMIT_SILENCE_MS = 2500;
 // Safety net: if no audio activity (no speech detected at all) for 30
 // seconds, auto-end the session to free server resources. User can
 // always tap Start again. End Session button overrides this.
@@ -158,6 +163,7 @@ export function useRecording(): UseRecordingResult {
         }
       }
     } else if (event.type === 'final') {
+      console.log('[SESSION] handleTranscript: final received:', JSON.stringify(event.text));
       setPartialTranscript('');
       // Auto-save flow: every committed transcript with an item_name goes
       // straight into confirmedItems. record.tsx auto-saves them via DB,
@@ -170,6 +176,13 @@ export function useRecording(): UseRecordingResult {
         const parsed = parseTranscription(text);
         if (parsed.item_name !== null) newConfirmed.push(parsed);
       }
+      console.log(
+        '[SESSION] handleTranscript: parsed',
+        itemTexts.length,
+        'segments,',
+        newConfirmed.length,
+        'have item_name and will auto-save'
+      );
       if (newConfirmed.length > 0) {
         setConfirmedItems((prev) => [...prev, ...newConfirmed]);
       }
@@ -213,7 +226,9 @@ export function useRecording(): UseRecordingResult {
       const silenceDuration = Date.now() - silenceStartedAt.current;
       if (silenceDuration > COMMIT_SILENCE_MS && !autoStopFired.current) {
         autoStopFired.current = true;
-        console.log('[VAD] 8s sustained silence — committing utterance');
+        console.log(
+          `[SESSION] VAD: ${COMMIT_SILENCE_MS}ms sustained silence — firing commitUtterance`
+        );
         setTimeout(() => commitUtteranceRef.current(), 0);
       }
     }
@@ -224,7 +239,9 @@ export function useRecording(): UseRecordingResult {
       lastSpeechAt.current > 0 &&
       Date.now() - lastSpeechAt.current > AUTO_STOP_SILENCE_MS
     ) {
-      console.log('[VAD] 30s of inactivity — auto-ending session');
+      console.log(
+        `[SESSION] VAD: ${AUTO_STOP_SILENCE_MS}ms inactivity — auto-ending session`
+      );
       lastSpeechAt.current = 0;
       setTimeout(() => stopRecordingRef.current(), 0);
     }
@@ -426,16 +443,19 @@ export function useRecording(): UseRecordingResult {
         }
         const pcmBase64 = bytesToBase64(float32ToPcm16Bytes(leftover));
         console.log(
-          '[VAD] Committing utterance, leftover base64 length:',
-          pcmBase64.length
+          '[SESSION] commitUtterance: sending leftover+commit:true, base64 length',
+          pcmBase64.length,
+          '— awaiting committed_transcript'
         );
         sttService.current.sendFinalAudio(pcmBase64);
       } else {
-        console.log('[VAD] Committing utterance, empty leftover');
+        console.log(
+          '[SESSION] commitUtterance: empty leftover, flushing commit:true — awaiting committed_transcript'
+        );
         sttService.current.flush();
       }
     } catch (err) {
-      console.error('[VAD] Commit failed:', err);
+      console.error('[SESSION] commitUtterance failed:', err);
     }
     // Reset per-utterance buffers and VAD state. The audio worklet keeps
     // running and will populate these again as the user speaks the next item.

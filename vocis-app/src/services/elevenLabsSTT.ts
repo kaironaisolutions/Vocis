@@ -298,7 +298,9 @@ export class ElevenLabsSTTService {
       };
 
       this.ws.onclose = async (event) => {
-        console.log(`[STT] WebSocket closed — code: ${event.code}, reason: "${event.reason}", wasClean: ${event.wasClean}`);
+        console.log(
+          `[SESSION] STT WebSocket closed — code: ${event.code}, reason: "${event.reason}", wasClean: ${event.wasClean}`
+        );
         await this.cleanup();
         if (event.code !== 1000) {
           this.callbacks.onError(

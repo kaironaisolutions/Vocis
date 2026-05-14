@@ -89,6 +89,10 @@ export default function RecordScreen() {
   const [tipDismissed, setTipDismissed] = useState(false);
   const [tipIndex] = useState(() => Math.floor(Math.random() * RECORDING_TIPS.length));
   const [savedFlash, setSavedFlash] = useState<string | null>(null);
+  // "Still recording — tap End Session when done" hint shown after a long
+  // silence post-save. Drives users to End Session if they walked away.
+  const [silenceWarning, setSilenceWarning] = useState(false);
+  const silenceWarningTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -128,10 +132,52 @@ export default function RecordScreen() {
 
   useEffect(() => {
     if (recordingHook.confirmedItems.length > 0) {
+      console.log(
+        '[SESSION] confirmedItems useEffect fired with',
+        recordingHook.confirmedItems.length,
+        'items — auto-saving each'
+      );
       for (const item of recordingHook.confirmedItems) confirmItem(item);
       recordingHook.consumeConfirmedItems();
+      // Clear the still-recording hint whenever a save lands — the user
+      // is obviously still active. setSilenceWarning(false) is idempotent.
+      setSilenceWarning(false);
+      if (silenceWarningTimer.current) {
+        clearTimeout(silenceWarningTimer.current);
+        silenceWarningTimer.current = null;
+      }
     }
   }, [recordingHook.confirmedItems]);
+
+  // Silence-warning state machine: after ~10s of post-save quiet (no new
+  // partials, no new items), show "Still recording…" so the user notices
+  // the session is still draining their mic / Cloudflare budget. Clears
+  // automatically on any speech (meteringDb rises above silence floor).
+  useEffect(() => {
+    if (!recording) {
+      setSilenceWarning(false);
+      if (silenceWarningTimer.current) {
+        clearTimeout(silenceWarningTimer.current);
+        silenceWarningTimer.current = null;
+      }
+      return;
+    }
+    if (recordingHook.meteringDb > -40) {
+      // Active speech — cancel any pending warning + hide existing one.
+      if (silenceWarningTimer.current) {
+        clearTimeout(silenceWarningTimer.current);
+        silenceWarningTimer.current = null;
+      }
+      if (silenceWarning) setSilenceWarning(false);
+      return;
+    }
+    // We're in silence. Arm the warning if not already armed.
+    if (silenceWarningTimer.current || silenceWarning) return;
+    silenceWarningTimer.current = setTimeout(() => {
+      setSilenceWarning(true);
+      silenceWarningTimer.current = null;
+    }, 10000);
+  }, [recordingHook.meteringDb, recording, silenceWarning]);
 
   useEffect(() => {
     if (recordingHook.partialTranscript) {
@@ -196,6 +242,7 @@ export default function RecordScreen() {
   useEffect(() => {
     return () => {
       if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+      if (silenceWarningTimer.current) clearTimeout(silenceWarningTimer.current);
     };
   }, []);
 
@@ -343,6 +390,15 @@ export default function RecordScreen() {
 
     const sid = await ensureSession();
     setSaving(true);
+    console.log(
+      '[SESSION] confirmItem: saving',
+      JSON.stringify({
+        size: sanitized.size,
+        decade: sanitized.decade,
+        item_name: sanitized.item_name,
+        price: sanitized.price,
+      })
+    );
     try {
       const id = await addItem({
         size: sanitized.size,
@@ -374,7 +430,9 @@ export default function RecordScreen() {
       if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
       setSavedFlash(persisted.item_name ?? 'Item');
       savedFlashTimer.current = setTimeout(() => setSavedFlash(null), SAVED_FLASH_MS);
-    } catch {
+      console.log('[SESSION] confirmItem: saved ✓', persisted.item_name);
+    } catch (err) {
+      console.error('[SESSION] confirmItem: save failed', err);
       setErrorMsg('Failed to save item.');
       haptic('parseError');
     } finally {
@@ -521,6 +579,17 @@ export default function RecordScreen() {
         ) : null}
 
       </View>
+
+      {/* Still-recording hint — if the user has been silent for ~10s
+          (e.g. distracted, walked away, paused without ending) we surface
+          this so they don't unintentionally drain the session. */}
+      {silenceWarning && (
+        <View style={styles.silenceWarning}>
+          <Text style={styles.silenceWarningText}>
+            Still recording… tap End Session when done
+          </Text>
+        </View>
+      )}
 
       {/* Saved-flash toast — hands-free confirmation that the previous
           utterance landed in the session list. Fades out after ~1.5s. */}
@@ -723,6 +792,20 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     fontSize: 15,
+  },
+  silenceWarning: {
+    backgroundColor: '#f59e0b',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    alignItems: 'center',
+  },
+  silenceWarningText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 13,
   },
   autoConfirmHint: {
     ...Typography.bodySmall,
