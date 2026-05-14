@@ -1062,3 +1062,73 @@ describe('dedupeCommittedTranscript', () => {
     expect(dedupeCommittedTranscript('   ')).toBe('');
   });
 });
+
+// ── YEARS MUST NOT BECOME PRICES / NAMES / LOST SIZE ───────────────────────
+//
+// "1992" is a year, never a price. Years arriving in comma-segmented input
+// ("Large 90s, 1992.") used to:
+//   - parse the year as price (parsePrice missing year guard)
+//   - lose size (parseSegmented passed full segment to parseSize, which
+//     only does exact-word match)
+//   - leave "1992" in item_name in some flows
+// parsePrice now rejects 1900-2099 unconditionally and bare > $500 without
+// $ context; parseSegmented does a word-level size scan; stripFillers
+// drops year-shaped tokens.
+
+describe('years must not become prices', () => {
+  it('"1992" alone — filtered as junk transcript', () => {
+    // isValidTranscript drops 4-digit pure-numeric inputs, so this never
+    // even reaches parseTranscript in production. Document the contract.
+    expect(isValidTranscript('1992')).toBe(false);
+  });
+
+  it('parsePrice("1992") rejects year', () => {
+    expect(parsePrice('1992')).toBeNull();
+  });
+
+  it('parsePrice("1930") rejects year', () => {
+    expect(parsePrice('1930')).toBeNull();
+  });
+
+  it('parsePrice("1992.") rejects year with trailing punct', () => {
+    expect(parsePrice('1992.')).toBeNull();
+  });
+
+  it('parsePrice("$1992") still rejected — year guard fires regardless of $', () => {
+    // Even with explicit $, a value in 1900-2099 is almost certainly a year
+    // mistakenly transcribed. The user can hand-edit the field afterward
+    // for legitimate $1995-priced items; the false-positive cost of
+    // accepting it as price is higher.
+    expect(parsePrice('$1992')).toBeNull();
+  });
+
+  it('parsePrice("750") without $ rejected — > $500 bare-number cap', () => {
+    expect(parsePrice('750')).toBeNull();
+  });
+
+  it('parsePrice("$750") allowed — explicit $', () => {
+    expect(parsePrice('$750')).toBe(750);
+  });
+});
+
+describe('"Large 90s, 1992." regression', () => {
+  it('year 1992 is not a price', () => {
+    const r = parseTranscript('Large 90s, 1992.');
+    expect(r.price).toBeNull();
+  });
+
+  it('size still detected when year present', () => {
+    const r = parseTranscript('Large 90s, 1992.');
+    expect(r.size).toBe('L');
+  });
+
+  it('decade detected from "90s" not from year', () => {
+    const r = parseTranscript('Large 90s, 1992.');
+    expect(r.decade).toBe("90's");
+  });
+
+  it('1992 is not an item name', () => {
+    const r = parseTranscript('Large 90s, 1992.');
+    expect(r.item_name).toBeNull();
+  });
+});

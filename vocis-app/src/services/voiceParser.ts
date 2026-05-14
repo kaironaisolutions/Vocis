@@ -260,6 +260,9 @@ const PRICE_SLANG: Record<string, number> = {
 // ─── Public small-string parsers (still used by tests + segmented path) ──────
 
 export function parsePrice(text: string): number | null {
+  // Track $-context BEFORE stripping the symbol — used to gate plausibility
+  // ranges below ("1992" without $ is a year, not a price).
+  const hasDollarSign = text.includes('$');
   const cleaned = text.toLowerCase().replace(/dollars?|bucks?|\$/g, '').trim();
   if (cleaned === '') return null;
 
@@ -268,7 +271,18 @@ export function parsePrice(text: string): number | null {
 
   // Direct numeric: "75", "75.00", "12.50"
   const directNum = parseFloat(cleaned.replace(/,/g, ''));
-  if (!isNaN(directNum) && directNum > 0) return directNum;
+  if (!isNaN(directNum) && directNum > 0) {
+    // Year guard — applies regardless of $ context. "$1992" is almost
+    // never a legitimate price; if a future customer really sells a
+    // $1995 jacket they can edit the field manually.
+    if (directNum >= 1900 && directNum <= 2099) return null;
+    // Bare numbers > $500 are almost always streaming artifacts or
+    // misparsed years/sample-rates. Real high-end prices arrive with $
+    // and route through Pattern B in detectPriceInWords.
+    if (!hasDollarSign && directNum > 500) return null;
+    if (directNum > 9999) return null;
+    return directNum;
+  }
 
   const words = cleaned.replace(/-/g, ' ').split(/\s+/).filter(Boolean);
   if (words.length === 0) return null;
@@ -443,6 +457,10 @@ const FILLER_WORDS = new Set([
 // the first claims the decade slot. Filter the rest from item_name so we
 // don't get "90's 90s Hat".
 const DECADE_TOKEN_RE = /^['‘’`]?\d{2}['‘’`]?s$/i;
+// Year-shaped tokens ("1992", "1930", "2024s", "1990s") that may survive
+// when a transcript like "Large 90s, 1992." gets parsed and "1992" ends up
+// in the leftover. These are never legitimate item-name words.
+const YEAR_TOKEN_RE = /^(?:19|20)\d{2}s?$/;
 
 function stripFillers(words: string[]): string[] {
   return words.filter((w) => {
@@ -450,6 +468,7 @@ function stripFillers(words: string[]): string[] {
     if (cleaned === '') return false;
     if (FILLER_WORDS.has(cleaned)) return false;
     if (DECADE_TOKEN_RE.test(cleaned)) return false;
+    if (YEAR_TOKEN_RE.test(cleaned)) return false;
     return true;
   });
 }
@@ -628,9 +647,25 @@ function parseSegmented(cleaned: string): ParsedItem {
   let price: number | null = null;
   const claimed = new Set<number>();
 
-  for (let i = 0; i < segments.length; i++) {
+  // Size detection: try full-segment match first ("Medium"), then fall
+  // back to word-level scan inside each segment so messy comma usage
+  // ("Large 90s, 1992.") still finds "Large" instead of leaving size=null.
+  // On a word-level hit we splice the size word out of the segment so it
+  // doesn't leak into item_name, but leave the rest available for decade/
+  // price/item-name detection.
+  for (let i = 0; i < segments.length && size === null; i++) {
     const parsed = parseSize(segments[i]);
     if (parsed) { size = parsed; claimed.add(i); break; }
+    const words = segments[i].split(/\s+/);
+    for (let j = 0; j < words.length; j++) {
+      const wordSize = parseSize(words[j]);
+      if (wordSize) {
+        size = wordSize;
+        words.splice(j, 1);
+        segments[i] = words.join(' ');
+        break;
+      }
+    }
   }
 
   for (let i = 0; i < segments.length; i++) {
@@ -935,7 +970,22 @@ function buildResult(
   // Without this, "Nike Hoodie. Twenty five dollars" leaves "Nike Hoodie."
   // as the item name, including the period.
   const trimmed = itemName.trim().replace(/^[\s,.;!?]+|[\s,.;!?]+$/g, '');
-  let item_name = trimmed.length > 0 ? titleCase(trimmed) : null;
+
+  // Drop year/decade-shaped tokens and bare-digit fragments that survived
+  // segmented assembly — "1992" should never become an item_name. The
+  // parseWordByWord path uses stripFillers; the parseSegmented path joins
+  // unclaimed segments verbatim, so we re-apply the filter here as the
+  // single chokepoint before titleCase.
+  const cleanedWords = trimmed.split(/\s+/).filter((w) => {
+    const lower = w.toLowerCase().replace(/[.,!?]/g, '');
+    if (lower === '') return false;
+    if (YEAR_TOKEN_RE.test(lower)) return false;
+    if (DECADE_TOKEN_RE.test(lower)) return false;
+    if (/^\d+$/.test(lower)) return false;
+    return true;
+  });
+  const rebuilt = cleanedWords.join(' ');
+  let item_name = rebuilt.length > 0 ? titleCase(rebuilt) : null;
 
   // Reject single-word item_names that are common filler / mishear
   // fragments. A real brand or garment name is almost always 2+ words
