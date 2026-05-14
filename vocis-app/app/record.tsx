@@ -30,7 +30,36 @@ import { confirmDestructive } from '../src/services/confirm';
 const MAX_ITEMS_PER_SESSION = 200;
 const MAX_ITEMS_PER_MINUTE = 15;
 const MAX_SESSION_DURATION_MS = 30 * 60 * 1000; // 30 minutes
-const AUTO_CONFIRM_DELAY_MS = 2500; // 2.5 seconds before auto-confirm
+const SAVED_FLASH_MS = 1500; // how long the "✓ Saved" toast stays visible
+
+// Soft web-audio chime played on each successful save — hands-free
+// confirmation so the user doesn't have to look at the screen between
+// items. Uses its own short-lived AudioContext to avoid touching the
+// recording context.
+function playSaveChime() {
+  if (typeof window === 'undefined') return;
+  const AC = (window as unknown as { AudioContext?: typeof AudioContext })
+    .AudioContext;
+  if (!AC) return;
+  try {
+    const ctx = new AC();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880; // A5
+    const now = ctx.currentTime;
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.02);
+    gain.gain.linearRampToValueAtTime(0, now + 0.18);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.2);
+    osc.onended = () => { try { ctx.close(); } catch {} };
+  } catch {
+    // Best-effort — silence is acceptable.
+  }
+}
 
 interface LoggedItem {
   parsed: ParsedItem;
@@ -59,9 +88,10 @@ export default function RecordScreen() {
   const [saving, setSaving] = useState(false);
   const [tipDismissed, setTipDismissed] = useState(false);
   const [tipIndex] = useState(() => Math.floor(Math.random() * RECORDING_TIPS.length));
+  const [savedFlash, setSavedFlash] = useState<string | null>(null);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const autoConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionStartTime = useRef<number>(0);
   const recentItemTimestamps = useRef<number[]>([]);
   const scrollRef = useRef<ScrollView>(null);
@@ -165,7 +195,7 @@ export default function RecordScreen() {
   // --- Cleanup on unmount ---
   useEffect(() => {
     return () => {
-      if (autoConfirmTimer.current) clearTimeout(autoConfirmTimer.current);
+      if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
     };
   }, []);
 
@@ -258,80 +288,19 @@ export default function RecordScreen() {
   }
 
   // --- Handle a parsed item ---
+  // Called when the hook reports a partial-derived pending item for live
+  // preview only. Final items go through recordingHook.confirmedItems
+  // which auto-saves directly — no manual confirm step in this flow.
   function handleParsedItem(parsed: ParsedItem) {
-    // Read the LATEST pending item from the ref — NOT the closure-captured
-    // value. handleParsedItem is invoked from useEffect watchers that close
-    // over a stale pendingItem on every render; the ref always points at the
-    // current state.
     const previous = pendingItemRef.current;
-
-    const previousIsComplete =
-      previous &&
-      previous.size !== null &&
-      previous.price !== null;
-
-    if (previousIsComplete) {
-      confirmItem(previous!);
-    }
-
-    if (autoConfirmTimer.current) {
-      clearTimeout(autoConfirmTimer.current);
-      autoConfirmTimer.current = null;
-    }
-
-    // Merge into the prior pending item (unless that prior item was just
-    // confirmed and is conceptually done) so partial transcripts accumulate.
-    const merged =
-      previous && !previousIsComplete ? mergeItems(previous, parsed) : parsed;
-
-    console.log('[MERGE] Incoming parsed:', {
-      size: parsed.size,
-      decade: parsed.decade,
-      item_name: parsed.item_name,
-      price: parsed.price,
-    });
-    console.log('[MERGE] Previous state:', {
-      size: previous?.size,
-      decade: previous?.decade,
-      item_name: previous?.item_name,
-      price: previous?.price,
-    });
-    console.log('[MERGE] Result after merge:', {
-      size: merged.size,
-      decade: merged.decade,
-      item_name: merged.item_name,
-      price: merged.price,
-    });
-
-    // Keep the ref in sync immediately so any follow-up calls inside the
-    // same event handler (e.g. multiple items inside one final transcript)
-    // see the new merged value rather than waiting for the useEffect that
-    // syncs the ref from React state.
+    const merged = previous ? mergeItems(previous, parsed) : parsed;
     pendingItemRef.current = merged;
     setPendingItem(merged);
-
-    const hasEnoughFields =
-      (merged.size !== null || merged.decade !== null) && merged.price !== null;
-
-    if (hasEnoughFields) {
-      // Auto-confirm after delay (user can tap to confirm/edit sooner).
-      // Use the merged item so we save the assembled fields, not just the
-      // last fragment.
-      autoConfirmTimer.current = setTimeout(() => {
-        confirmItem(merged);
-      }, AUTO_CONFIRM_DELAY_MS);
-    }
   }
 
   // --- Confirm and save item ---
   async function confirmItem(item: ParsedItem) {
-    if (autoConfirmTimer.current) {
-      clearTimeout(autoConfirmTimer.current);
-      autoConfirmTimer.current = null;
-    }
-
-    // Sanitize and validate FIRST — atomic guard against race conditions
-    // (prevents double-trigger from auto-confirm + manual confirm).
+    // Sanitize and validate FIRST — atomic guard against race conditions.
     // Null fields fall through to placeholders that validation flags as
     // warnings/errors; an item with item_name === null fails validation.
     const sanitized = {
@@ -382,6 +351,12 @@ export default function RecordScreen() {
       setLiveTranscript('');
       recordingHook.clearPendingItem();
       haptic('parseSuccess');
+      // Hands-free confirmation — chime + on-screen flash for ~1.5s. The
+      // user doesn't need to look at the screen to know the save landed.
+      playSaveChime();
+      if (savedFlashTimer.current) clearTimeout(savedFlashTimer.current);
+      setSavedFlash(persisted.item_name ?? 'Item');
+      savedFlashTimer.current = setTimeout(() => setSavedFlash(null), SAVED_FLASH_MS);
     } catch {
       setErrorMsg('Failed to save item.');
       haptic('parseError');
@@ -391,10 +366,6 @@ export default function RecordScreen() {
   }
 
   function discardPending() {
-    if (autoConfirmTimer.current) {
-      clearTimeout(autoConfirmTimer.current);
-      autoConfirmTimer.current = null;
-    }
     pendingItemRef.current = null;
     setPendingItem(null);
     setLiveTranscript('');
@@ -506,7 +477,9 @@ export default function RecordScreen() {
               ]}
             >
               <View style={[styles.micInner, recording && styles.micInnerActive]}>
-                <Text style={styles.micIcon}>{recording ? 'Stop' : 'Start'}</Text>
+                <Text style={styles.micIcon}>
+                  {recording ? 'End Session' : 'Start'}
+                </Text>
               </View>
             </Animated.View>
           </TouchableOpacity>
@@ -532,30 +505,20 @@ export default function RecordScreen() {
 
       </View>
 
+      {/* Saved-flash toast — hands-free confirmation that the previous
+          utterance landed in the session list. Fades out after ~1.5s. */}
+      {savedFlash && (
+        <View style={styles.savedFlash}>
+          <Text style={styles.savedFlashText}>✓ {savedFlash}</Text>
+        </View>
+      )}
+
       {/* Pending item preview */}
       {pendingItem && (
         <View style={styles.previewSection}>
           <View style={styles.previewHeader}>
-            <Text style={styles.previewLabel}>PREVIEW</Text>
-            <View style={styles.previewHeaderRight}>
-              {pendingItem.size !== null && pendingItem.price !== null && (
-                <Text style={styles.autoConfirmHint}>Auto-confirming...</Text>
-              )}
-              <TouchableOpacity
-                onPress={handleClear}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <Text style={styles.clearButtonText}>Clear</Text>
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.previewLabel}>HEARING</Text>
           </View>
-          {pendingItem.confidence < 50 && (
-            <View style={styles.lowConfidenceWarning}>
-              <Text style={styles.warningText}>
-                Some fields could not be detected. Please review and edit before confirming.
-              </Text>
-            </View>
-          )}
           <ItemPreviewCard
             item={{
               id: '',
@@ -567,41 +530,9 @@ export default function RecordScreen() {
               session_id: sessionId || '',
               logged_at: new Date().toISOString(),
             }}
-            editable
-            onCancel={discardPending}
+            editable={false}
             rawTranscript={pendingItem.raw_transcript}
           />
-          {pendingItem.confidence < 50 && !recording && (
-            <View style={styles.retryRow}>
-              <TouchableOpacity
-                style={styles.retryButton}
-                onPress={async () => {
-                  haptic('recordStart');
-                  discardPending();
-                  await recordingHook.startRecording();
-                }}
-              >
-                <Text style={styles.retryText}>Try Again</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-          <View style={styles.previewActions}>
-            <Button
-              title="Discard"
-              onPress={discardPending}
-              variant="secondary"
-              size="medium"
-              style={styles.discardButton}
-            />
-            <Button
-              title="Confirm Now"
-              onPress={() => confirmItem(pendingItem)}
-              variant="primary"
-              size="medium"
-              loading={saving}
-              style={styles.confirmButton}
-            />
-          </View>
         </View>
       )}
 
@@ -761,6 +692,20 @@ const styles = StyleSheet.create({
   },
   previewLabel: {
     ...Typography.label,
+  },
+  savedFlash: {
+    backgroundColor: '#22c55e',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    marginHorizontal: Spacing.md,
+    marginBottom: Spacing.sm,
+    alignItems: 'center',
+  },
+  savedFlashText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 15,
   },
   autoConfirmHint: {
     ...Typography.bodySmall,

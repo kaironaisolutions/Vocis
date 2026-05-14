@@ -38,7 +38,12 @@ export interface UseRecordingResult {
 const TARGET_SAMPLE_RATE = 16000;
 const SILENCE_THRESHOLD_DB = -40;
 const SPEECH_START_THRESHOLD_DB = -25;
-const SILENCE_DURATION_MS = 1500;
+// Per-item commit threshold: 3 seconds of silence after speech triggers a
+// commit:true (saves the current utterance) but does NOT tear down the
+// recording session. The audio context and WebSocket stay alive so the
+// user can keep speaking — pick up next garment, talk, pause, repeat.
+// Session only ends when the user taps End Session.
+const COMMIT_SILENCE_MS = 3000;
 const MIN_SPEECH_DURATION_MS = 1000;
 const MIN_RECORDING_SAMPLES = TARGET_SAMPLE_RATE * 0.1;
 // 200ms chunks — small enough to keep partial transcripts feeling live,
@@ -146,22 +151,24 @@ export function useRecording(): UseRecordingResult {
       }
     } else if (event.type === 'final') {
       setPartialTranscript('');
+      // Auto-save flow: every committed transcript with an item_name goes
+      // straight into confirmedItems. record.tsx auto-saves them via DB,
+      // shows the saved-flash, and clears pendingItem. Items without an
+      // item_name (fragments, noise) are dropped here — validateItem in
+      // record.tsx would reject them anyway.
       const itemTexts = splitMultipleItems(event.text);
       const newConfirmed: ParsedItem[] = [];
-      let lastIncomplete: ParsedItem | null = null;
       for (const text of itemTexts) {
         const parsed = parseTranscription(text);
-        if (parsed.price !== null) newConfirmed.push(parsed);
-        else lastIncomplete = parsed;
+        if (parsed.item_name !== null) newConfirmed.push(parsed);
       }
       if (newConfirmed.length > 0) {
         setConfirmedItems((prev) => [...prev, ...newConfirmed]);
       }
-      if (lastIncomplete) {
-        setPendingItem((prev) =>
-          prev ? mergeItems(prev, lastIncomplete!) : lastIncomplete
-        );
-      }
+      // Clear the live-preview pending item so the UI resets between
+      // utterances. The save handler in record.tsx also does this; this
+      // is the hook-side mirror.
+      setPendingItem(null);
     }
   }, []);
 
@@ -174,8 +181,10 @@ export function useRecording(): UseRecordingResult {
     setError(errorMsg);
   }, []);
 
-  // VAD: track speech onset → sustained silence → auto-stop.
-  // stopRecording is declared after this; we read the latest ref at fire time.
+  // VAD: track speech onset → sustained silence → COMMIT (not stop).
+  // commitUtteranceRef is read at fire-time so we always get the current
+  // closure (function is declared further down).
+  const commitUtteranceRef = useRef<() => void>(() => {});
   const stopRecordingRef = useRef<() => Promise<void>>(async () => {});
 
   const handleMetering = useCallback((db: number) => {
@@ -193,10 +202,10 @@ export function useRecording(): UseRecordingResult {
         return;
       }
       const silenceDuration = Date.now() - silenceStartedAt.current;
-      if (silenceDuration > SILENCE_DURATION_MS && !autoStopFired.current) {
+      if (silenceDuration > COMMIT_SILENCE_MS && !autoStopFired.current) {
         autoStopFired.current = true;
-        console.log('[VAD] Sustained silence — auto-stopping');
-        setTimeout(() => stopRecordingRef.current(), 0);
+        console.log('[VAD] 3s sustained silence — committing utterance');
+        setTimeout(() => commitUtteranceRef.current(), 0);
       }
     }
   }, []);
@@ -366,6 +375,55 @@ export function useRecording(): UseRecordingResult {
     teardownAudioGraph,
   ]);
 
+  /**
+   * Commit the current utterance and KEEP recording. Called from VAD when
+   * sustained silence is detected after speech. Sends commit:true to
+   * ElevenLabs (which will emit a committed_transcript), then resets the
+   * VAD state so the next utterance is detected from scratch. The audio
+   * context, mic stream, and WebSocket stay alive.
+   */
+  const commitUtterance = useCallback(() => {
+    if (!sttService.current) return;
+    if (collectedSampleCount.current < MIN_RECORDING_SAMPLES) {
+      // Not enough audio to commit — likely a false-positive VAD trigger
+      // (background cough, brief noise). Reset and keep listening.
+      speechStartedAt.current = null;
+      silenceStartedAt.current = null;
+      autoStopFired.current = false;
+      return;
+    }
+    try {
+      if (unsentSampleCount.current > 0) {
+        const leftover = new Float32Array(unsentSampleCount.current);
+        let offset = 0;
+        for (const buf of unsentSamples.current) {
+          leftover.set(buf, offset);
+          offset += buf.length;
+        }
+        const pcmBase64 = bytesToBase64(float32ToPcm16Bytes(leftover));
+        console.log(
+          '[VAD] Committing utterance, leftover base64 length:',
+          pcmBase64.length
+        );
+        sttService.current.sendFinalAudio(pcmBase64);
+      } else {
+        console.log('[VAD] Committing utterance, empty leftover');
+        sttService.current.flush();
+      }
+    } catch (err) {
+      console.error('[VAD] Commit failed:', err);
+    }
+    // Reset per-utterance buffers and VAD state. The audio worklet keeps
+    // running and will populate these again as the user speaks the next item.
+    unsentSamples.current = [];
+    unsentSampleCount.current = 0;
+    collectedSamples.current = [];
+    collectedSampleCount.current = 0;
+    speechStartedAt.current = null;
+    silenceStartedAt.current = null;
+    autoStopFired.current = false;
+  }, []);
+
   const stopRecording = useCallback(async () => {
     setPhase('transcribing');
     await teardownAudioGraph();
@@ -440,7 +498,8 @@ export function useRecording(): UseRecordingResult {
 
   useEffect(() => {
     stopRecordingRef.current = stopRecording;
-  }, [stopRecording]);
+    commitUtteranceRef.current = commitUtterance;
+  }, [stopRecording, commitUtterance]);
 
   useEffect(() => {
     return () => {
