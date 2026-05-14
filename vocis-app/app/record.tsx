@@ -266,11 +266,11 @@ export default function RecordScreen() {
     []
   );
 
-  // --- Start/Stop ---
+  // --- Start/End Session ---
   async function handleStartStop() {
     if (recording) {
       haptic('recordStop');
-      stopListening();
+      await endSession();
     } else {
       haptic('recordStart');
       await ensureSession();
@@ -279,12 +279,29 @@ export default function RecordScreen() {
     }
   }
 
+  // Stop recording without navigation. Used by VAD auto-stop, session
+  // duration timeout, and the unmount cleanup path.
   function stopListening() {
     recordingHook.stopRecording();
-    // If there's a pending item, confirm it
-    if (pendingItem) {
-      confirmItem(pendingItem);
-    }
+    if (pendingItem) confirmItem(pendingItem);
+  }
+
+  // Full End-Session flow: stop, save any pending utterance, then go
+  // straight to the review screen where the user can edit / export.
+  // The standalone "Done" button (handleDone) still exists as a fallback
+  // if the user paused recording but didn't want to end.
+  async function endSession() {
+    recordingHook.stopRecording();
+    if (pendingItem) confirmItem(pendingItem);
+    // Give confirmItem a tick to commit pendingItem to loggedItems and
+    // the DB. Then navigate. If there's nothing saved, just go home.
+    setTimeout(() => {
+      if (sessionId && loggedItems.length > 0) {
+        router.replace(`/session/${sessionId}`);
+      } else {
+        router.back();
+      }
+    }, 100);
   }
 
   // --- Handle a parsed item ---

@@ -38,12 +38,15 @@ export interface UseRecordingResult {
 const TARGET_SAMPLE_RATE = 16000;
 const SILENCE_THRESHOLD_DB = -40;
 const SPEECH_START_THRESHOLD_DB = -25;
-// Per-item commit threshold: 3 seconds of silence after speech triggers a
+// Per-item commit threshold: 8 seconds of silence after speech triggers a
 // commit:true (saves the current utterance) but does NOT tear down the
 // recording session. The audio context and WebSocket stay alive so the
 // user can keep speaking — pick up next garment, talk, pause, repeat.
-// Session only ends when the user taps End Session.
-const COMMIT_SILENCE_MS = 3000;
+const COMMIT_SILENCE_MS = 8000;
+// Safety net: if no audio activity (no speech detected at all) for 30
+// seconds, auto-end the session to free server resources. User can
+// always tap Start again. End Session button overrides this.
+const AUTO_STOP_SILENCE_MS = 30000;
 const MIN_SPEECH_DURATION_MS = 1000;
 const MIN_RECORDING_SAMPLES = TARGET_SAMPLE_RATE * 0.1;
 // 200ms chunks — small enough to keep partial transcripts feeling live,
@@ -137,6 +140,11 @@ export function useRecording(): UseRecordingResult {
   const speechStartedAt = useRef<number | null>(null);
   const silenceStartedAt = useRef<number | null>(null);
   const autoStopFired = useRef<boolean>(false);
+  // Wall-clock timestamp of the last time audio crossed the speech-start
+  // threshold. Drives the 30s "no activity at all" auto-end safety net.
+  // Initialized in startRecording so the user gets a grace period before
+  // the timer starts ticking.
+  const lastSpeechAt = useRef<number>(0);
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
     if (event.type === 'partial') {
@@ -190,6 +198,7 @@ export function useRecording(): UseRecordingResult {
   const handleMetering = useCallback((db: number) => {
     setMeteringDb(db);
     if (db > SPEECH_START_THRESHOLD_DB) {
+      lastSpeechAt.current = Date.now();
       if (speechStartedAt.current === null) speechStartedAt.current = Date.now();
       silenceStartedAt.current = null;
       return;
@@ -204,9 +213,20 @@ export function useRecording(): UseRecordingResult {
       const silenceDuration = Date.now() - silenceStartedAt.current;
       if (silenceDuration > COMMIT_SILENCE_MS && !autoStopFired.current) {
         autoStopFired.current = true;
-        console.log('[VAD] 3s sustained silence — committing utterance');
+        console.log('[VAD] 8s sustained silence — committing utterance');
         setTimeout(() => commitUtteranceRef.current(), 0);
       }
+    }
+    // Inactivity safety net: if 30 seconds have passed without ANY speech
+    // (the user wandered off, forgot to tap End Session, etc.), tear down
+    // so we're not holding the WebSocket open burning CF resources.
+    if (
+      lastSpeechAt.current > 0 &&
+      Date.now() - lastSpeechAt.current > AUTO_STOP_SILENCE_MS
+    ) {
+      console.log('[VAD] 30s of inactivity — auto-ending session');
+      lastSpeechAt.current = 0;
+      setTimeout(() => stopRecordingRef.current(), 0);
     }
   }, []);
 
@@ -252,6 +272,10 @@ export function useRecording(): UseRecordingResult {
       speechStartedAt.current = null;
       silenceStartedAt.current = null;
       autoStopFired.current = false;
+      // Grace period for the user to actually start speaking before the
+      // 30s inactivity auto-stop kicks in. Reset to Date.now() so the
+      // first 30s after Start are tolerated even if completely silent.
+      lastSpeechAt.current = Date.now();
       collectedSamples.current = [];
       collectedSampleCount.current = 0;
       unsentSamples.current = [];
@@ -493,6 +517,7 @@ export function useRecording(): UseRecordingResult {
     setMeteringDb(-160);
     speechStartedAt.current = null;
     silenceStartedAt.current = null;
+    lastSpeechAt.current = 0;
     setPhase((p) => (p === 'listening' || p === 'transcribing' ? 'idle' : p));
   }, [teardownAudioGraph]);
 
