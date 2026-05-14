@@ -53,3 +53,6 @@ GoogleService-Info.plist
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+# Claude Code runtime locks (per-session, must not be tracked)
+.claude/scheduled_tasks.lock
