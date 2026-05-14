@@ -9,6 +9,7 @@ import {
 import { Colors, Typography, Spacing, BorderRadius } from '../constants/theme';
 import { Card } from './Card';
 import { InventoryItem } from '../types';
+import { formatRawTitle } from '../services/voiceParser';
 
 interface ItemPreviewCardProps {
   item: InventoryItem;
@@ -48,7 +49,7 @@ export function ItemPreviewCard({
       } else {
         (updated as Record<string, unknown>)[field] = value;
       }
-      updated.raw_title = `(${updated.size}) ${updated.decade} ${updated.item_name}`;
+      updated.raw_title = formatRawTitle(updated.size, updated.decade, updated.item_name);
       return updated;
     });
   }

@@ -41,6 +41,9 @@ const SPEECH_START_THRESHOLD_DB = -25;
 const SILENCE_DURATION_MS = 1500;
 const MIN_SPEECH_DURATION_MS = 1000;
 const MIN_RECORDING_SAMPLES = TARGET_SAMPLE_RATE * 0.1;
+// 200ms chunks — small enough to keep partial transcripts feeling live,
+// large enough to avoid spamming the WebSocket (~5 sends/second).
+const STREAMING_CHUNK_SAMPLES = TARGET_SAMPLE_RATE * 0.2;
 
 // Inline AudioWorklet that ships each 128-sample Float32 block from the mic
 // back to the main thread. Loaded via Blob URL so no separate file / bundler
@@ -115,8 +118,17 @@ export function useRecording(): UseRecordingResult {
   const workletNode = useRef<AudioWorkletNode | null>(null);
   const sourceNode = useRef<MediaStreamAudioSourceNode | null>(null);
   const muteGain = useRef<GainNode | null>(null);
+  // Full-session buffer — sent in one shot on stop via sendFinalAudio so
+  // ElevenLabs commits the entire utterance. (Per the STT service comments,
+  // commit:true must carry the audio; chunks streamed with commit:false do
+  // not survive into the final commit.)
   const collectedSamples = useRef<Float32Array[]>([]);
   const collectedSampleCount = useRef<number>(0);
+  // Streaming buffer — drained every ~200ms via sendAudio (commit:false) to
+  // trigger partial_transcript events for live UI feedback. Parallel to the
+  // full-session buffer; sample data ends up in both.
+  const unsentSamples = useRef<Float32Array[]>([]);
+  const unsentSampleCount = useRef<number>(0);
   const speechStartedAt = useRef<number | null>(null);
   const silenceStartedAt = useRef<number | null>(null);
   const autoStopFired = useRef<boolean>(false);
@@ -233,6 +245,8 @@ export function useRecording(): UseRecordingResult {
       autoStopFired.current = false;
       collectedSamples.current = [];
       collectedSampleCount.current = 0;
+      unsentSamples.current = [];
+      unsentSampleCount.current = 0;
 
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
         setError(
@@ -289,7 +303,30 @@ export function useRecording(): UseRecordingResult {
         const pcm = event.data;
         collectedSamples.current.push(pcm);
         collectedSampleCount.current += pcm.length;
+        unsentSamples.current.push(pcm);
+        unsentSampleCount.current += pcm.length;
         handleMetering(rmsToDb(pcm));
+
+        // Drain the streaming buffer once we have ~200ms of audio; sending
+        // smaller chunks at higher cadence makes partial transcripts feel
+        // responsive without saturating the WebSocket.
+        if (
+          unsentSampleCount.current >= STREAMING_CHUNK_SAMPLES &&
+          sttService.current
+        ) {
+          const chunks = unsentSamples.current;
+          const total = unsentSampleCount.current;
+          unsentSamples.current = [];
+          unsentSampleCount.current = 0;
+          const combined = new Float32Array(total);
+          let offset = 0;
+          for (const buf of chunks) {
+            combined.set(buf, offset);
+            offset += buf.length;
+          }
+          const pcmBase64 = bytesToBase64(float32ToPcm16Bytes(combined));
+          sttService.current.sendAudio(pcmBase64);
+        }
       };
 
       // Routing: mic → worklet → muted gain → destination.
@@ -369,6 +406,8 @@ export function useRecording(): UseRecordingResult {
 
     collectedSamples.current = [];
     collectedSampleCount.current = 0;
+    unsentSamples.current = [];
+    unsentSampleCount.current = 0;
 
     // Give ElevenLabs ~3s to return the final transcript before closing.
     setTimeout(() => {

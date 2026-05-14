@@ -185,19 +185,41 @@ export function mergeItems(existing: ParsedItem, incoming: ParsedItem): ParsedIt
     (price !== null ? 25 : 0) +
     (item_name !== null ? 25 : 0);
 
-  const sizeDisplay = size ?? '?';
-  const decadeDisplay = decade ?? '?';
-  const nameDisplay = item_name ?? 'Unknown Item';
-
   return {
     size,
     decade,
     item_name,
     price,
-    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${nameDisplay}`,
+    raw_title: formatRawTitle(size, decade, item_name),
     raw_transcript: incoming.raw_transcript || existing.raw_transcript,
     confidence,
   };
+}
+
+/**
+ * Build the human-readable "(SIZE) DECADE Name" label.
+ *
+ * Display rules:
+ *   - Missing size  → "(?)"          — keep the placeholder so it's obvious
+ *                                       a field needs review.
+ *   - Missing decade → omit entirely — the decade segment is optional in
+ *                                       the title; "(L) Carhartt Jacket" is
+ *                                       cleaner than "(L) ? Carhartt Jacket".
+ *   - Missing name  → "Unknown Item" — matches the DB-level placeholder.
+ *
+ * Treats the literal "?" placeholder the same as null so items coming from
+ * the database (which stores "?" for unknown size/decade) format the same
+ * as freshly-parsed items.
+ */
+export function formatRawTitle(
+  size: string | null | undefined,
+  decade: string | null | undefined,
+  itemName: string | null | undefined
+): string {
+  const sizeStr = size && size !== '?' ? size : '?';
+  const decadeStr = decade && decade !== '?' ? `${decade} ` : '';
+  const nameStr = itemName && itemName !== 'Unknown Item' ? itemName : 'Unknown Item';
+  return `(${sizeStr}) ${decadeStr}${nameStr}`;
 }
 
 // ─── Number words ────────────────────────────────────────────────────────────
@@ -416,10 +438,19 @@ const FILLER_WORDS = new Set([
   'dollars', 'dollar', 'bucks', 'buck', 'usd',
 ]);
 
+// Decade-shaped tokens that occasionally survive consumption when Scribe
+// emits two decade markers in one transcript ("nineties 90s hat") — only
+// the first claims the decade slot. Filter the rest from item_name so we
+// don't get "90's 90s Hat".
+const DECADE_TOKEN_RE = /^['‘’`]?\d{2}['‘’`]?s$/i;
+
 function stripFillers(words: string[]): string[] {
   return words.filter((w) => {
     const cleaned = w.toLowerCase().replace(/[.,!?]/g, '');
-    return cleaned !== '' && !FILLER_WORDS.has(cleaned);
+    if (cleaned === '') return false;
+    if (FILLER_WORDS.has(cleaned)) return false;
+    if (DECADE_TOKEN_RE.test(cleaned)) return false;
+    return true;
   });
 }
 
@@ -831,16 +862,12 @@ function buildResult(
     (price !== null ? 25 : 0) +
     (item_name !== null ? 25 : 0);
 
-  const sizeDisplay = size ?? '?';
-  const decadeDisplay = decade ?? '?';
-  const nameDisplay = item_name ?? 'Unknown Item';
-
   return {
     size,
     decade,
     item_name,
     price,
-    raw_title: `(${sizeDisplay}) ${decadeDisplay} ${nameDisplay}`,
+    raw_title: formatRawTitle(size, decade, item_name),
     raw_transcript: '',
     confidence,
   };

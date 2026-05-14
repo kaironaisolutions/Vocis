@@ -6,6 +6,7 @@ import {
   parseSize,
   parseDecade,
   isValidTranscript,
+  formatRawTitle,
   ParsedItem,
 } from '../services/voiceParser';
 
@@ -889,5 +890,82 @@ describe('ITEM NAME: extracted from any position', () => {
     expect(r.size).toBe('L');
     expect(r.decade).toBe("80's");
     expect(r.price).toBe(45);
+  });
+});
+
+// ── DISPLAY / RAW_TITLE FORMATTING ─────────────────────────────────────────
+//
+// raw_title is built by formatRawTitle; behaviour pinned so the session
+// list ("(L) Carhartt Jacket") doesn't regress to "(L) ? Carhartt Jacket"
+// when a field is missing.
+
+describe('formatRawTitle', () => {
+  it('all fields present → full title', () => {
+    expect(formatRawTitle('L', "90's", 'Carhartt Jacket')).toBe(
+      "(L) 90's Carhartt Jacket"
+    );
+  });
+
+  it('decade missing → decade segment omitted', () => {
+    expect(formatRawTitle('L', null, 'Carhartt Jacket')).toBe(
+      '(L) Carhartt Jacket'
+    );
+  });
+
+  it('size missing → "(?)" kept, decade still shown', () => {
+    expect(formatRawTitle(null, "90's", 'Hat')).toBe("(?) 90's Hat");
+  });
+
+  it('both size and decade missing → just name', () => {
+    expect(formatRawTitle(null, null, 'Hat')).toBe('(?) Hat');
+  });
+
+  it('name missing → Unknown Item placeholder', () => {
+    expect(formatRawTitle('L', "90's", null)).toBe("(L) 90's Unknown Item");
+  });
+
+  it('DB-style "?" placeholders treated like null', () => {
+    // Items round-tripped through the DB store "?" for unknown size/decade;
+    // formatRawTitle must format them the same as freshly-parsed items.
+    expect(formatRawTitle('L', '?', 'Carhartt Jacket')).toBe('(L) Carhartt Jacket');
+    expect(formatRawTitle('?', "90's", 'Hat')).toBe("(?) 90's Hat");
+  });
+
+  it('parseTranscript output uses cleaner format', () => {
+    // "large Carhartt jacket" — size + name, no decade. The session list
+    // used to render "(L) ? Carhartt Jacket"; should now be clean.
+    const r = parseTranscript('large Carhartt jacket');
+    expect(r.size).toBe('L');
+    expect(r.decade).toBeNull();
+    expect(r.raw_title).toBe('(L) Carhartt Jacket');
+  });
+});
+
+// ── DECADE TOKENS LEAKING INTO ITEM_NAME ───────────────────────────────────
+//
+// When Scribe emits two decade-shaped tokens in one transcript ("nineties
+// 90s hat"), only the first wins the decade slot. The remaining "90s" used
+// to leak into item_name as "90s Hat". stripFillers now drops decade-shaped
+// tokens unconditionally.
+
+describe('decade-shaped tokens must not leak into item_name', () => {
+  it('"nineties 90s hat" → decade 90\'s, item_name "Hat"', () => {
+    const r = parseTranscript('nineties 90s hat');
+    expect(r.decade).toBe("90's");
+    expect(r.item_name).toBe('Hat');
+    expect(r.item_name).not.toMatch(/90/);
+  });
+
+  it("\"'90s 90s hat\" → decade 90's, item_name \"Hat\"", () => {
+    const r = parseTranscript("'90s 90s hat");
+    expect(r.decade).toBe("90's");
+    expect(r.item_name).toBe('Hat');
+  });
+
+  it('"eighties 80s Carhartt jacket" → no decade leak into name', () => {
+    const r = parseTranscript('eighties 80s Carhartt jacket');
+    expect(r.decade).toBe("80's");
+    expect(r.item_name?.toLowerCase()).toContain('carhartt');
+    expect(r.item_name).not.toMatch(/80/);
   });
 });
