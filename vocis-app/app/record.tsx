@@ -22,7 +22,7 @@ import { useRecording } from '../src/hooks/useRecording';
 import { useSecurity } from '../src/context/SecurityContext';
 import { createSession, addItem } from '../src/db/database';
 import { InventoryItem } from '../src/types';
-import { parseTranscription, splitMultipleItems, mergeItems, isValidTranscript, ParsedItem } from '../src/services/voiceParser';
+import { mergeItems, ParsedItem } from '../src/services/voiceParser';
 import { validateItem, sanitizeField } from '../src/services/validation';
 import { confirmDestructive } from '../src/services/confirm';
 
@@ -48,11 +48,10 @@ const RECORDING_TIPS = [
 
 export default function RecordScreen() {
   const router = useRouter();
-  const nativeRecording = useRecording();
+  const recordingHook = useRecording();
   const { isCompromised } = useSecurity();
 
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isListening, setIsListening] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState('');
   const [pendingItem, setPendingItem] = useState<ParsedItem | null>(null);
   const [loggedItems, setLoggedItems] = useState<LoggedItem[]>([]);
@@ -62,7 +61,6 @@ export default function RecordScreen() {
   const [tipIndex] = useState(() => Math.floor(Math.random() * RECORDING_TIPS.length));
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const recognitionRef = useRef<any>(null);
   const autoConfirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionStartTime = useRef<number>(0);
   const recentItemTimestamps = useRef<number[]>([]);
@@ -77,7 +75,7 @@ export default function RecordScreen() {
   }, [pendingItem]);
 
   // --- Pulse animation ---
-  const recording = Platform.OS === 'web' ? isListening : nativeRecording.isRecording;
+  const recording = recordingHook.isRecording;
 
   useEffect(() => {
     if (recording) {
@@ -93,35 +91,27 @@ export default function RecordScreen() {
     }
   }, [recording]);
 
-  // --- Sync native recording: pending items ---
+  // --- Sync recording hook → screen state ---
   useEffect(() => {
-    if (Platform.OS !== 'web' && nativeRecording.pendingItem) {
-      handleParsedItem(nativeRecording.pendingItem);
-    }
-  }, [nativeRecording.pendingItem]);
-
-  // --- Sync native recording: auto-confirmed items ---
-  useEffect(() => {
-    if (Platform.OS !== 'web' && nativeRecording.confirmedItems.length > 0) {
-      for (const item of nativeRecording.confirmedItems) {
-        confirmItem(item);
-      }
-      nativeRecording.consumeConfirmedItems();
-    }
-  }, [nativeRecording.confirmedItems]);
-
-  // --- Sync native recording: partial transcript ---
-  useEffect(() => {
-    if (Platform.OS !== 'web' && nativeRecording.partialTranscript) {
-      setLiveTranscript(nativeRecording.partialTranscript);
-    }
-  }, [nativeRecording.partialTranscript]);
+    if (recordingHook.pendingItem) handleParsedItem(recordingHook.pendingItem);
+  }, [recordingHook.pendingItem]);
 
   useEffect(() => {
-    if (Platform.OS !== 'web' && nativeRecording.error) {
-      setErrorMsg(nativeRecording.error);
+    if (recordingHook.confirmedItems.length > 0) {
+      for (const item of recordingHook.confirmedItems) confirmItem(item);
+      recordingHook.consumeConfirmedItems();
     }
-  }, [nativeRecording.error]);
+  }, [recordingHook.confirmedItems]);
+
+  useEffect(() => {
+    if (recordingHook.partialTranscript) {
+      setLiveTranscript(recordingHook.partialTranscript);
+    }
+  }, [recordingHook.partialTranscript]);
+
+  useEffect(() => {
+    if (recordingHook.error) setErrorMsg(recordingHook.error);
+  }, [recordingHook.error]);
 
   // --- Show errors ---
   useEffect(() => {
@@ -175,7 +165,6 @@ export default function RecordScreen() {
   // --- Cleanup on unmount ---
   useEffect(() => {
     return () => {
-      if (recognitionRef.current) recognitionRef.current.stop();
       if (autoConfirmTimer.current) clearTimeout(autoConfirmTimer.current);
     };
   }, []);
@@ -256,134 +245,24 @@ export default function RecordScreen() {
       haptic('recordStart');
       await ensureSession();
       sessionStartTime.current = Date.now();
-      if (Platform.OS === 'web') {
-        startWebSpeech();
-      } else {
-        await nativeRecording.startRecording();
-      }
+      await recordingHook.startRecording();
     }
   }
 
   function stopListening() {
-    if (Platform.OS === 'web') {
-      if (recognitionRef.current) recognitionRef.current.stop();
-      setIsListening(false);
-    } else {
-      nativeRecording.stopRecording();
-    }
+    recordingHook.stopRecording();
     // If there's a pending item, confirm it
     if (pendingItem) {
       confirmItem(pendingItem);
     }
   }
 
-  // --- Web Speech API (continuous mode) ---
-  function startWebSpeech() {
-    const SpeechRecognition =
-      (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setErrorMsg('Speech recognition not supported. Use Chrome or Edge.');
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;       // Keep listening until user stops
-    recognition.interimResults = true;   // Show live transcript
-    recognition.lang = 'en-US';
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsListening(true);
-      setLiveTranscript('');
-    };
-
-    recognition.onresult = (event: any) => {
-      const lastResult = event.results[event.results.length - 1];
-      const transcript = lastResult[0].transcript.trim();
-
-      if (lastResult.isFinal) {
-        // Final result — split and save items. Do NOT clear pendingItem
-        // here: handleParsedItem merges incoming fields into whatever has
-        // been accumulated so far. Clearing first would defeat the merge.
-        setLiveTranscript('');
-        console.log('[MERGE] Final transcript:', transcript);
-
-        // Drop streaming fragments before they reach parser state.
-        if (!isValidTranscript(transcript)) {
-          console.log('[FILTER] Skipped fragment:', transcript);
-          return;
-        }
-
-        const items = splitMultipleItems(transcript);
-        for (const itemText of items) {
-          if (!isValidTranscript(itemText)) continue;
-          const parsed = parseTranscription(itemText);
-          if (parsed.price !== null) {
-            confirmItem(parsed);
-          } else {
-            // Incomplete — show as pending for manual confirm
-            handleParsedItem(parsed);
-          }
-        }
-      } else {
-        // Interim — visual feedback only, no saving
-        setLiveTranscript(transcript);
-
-        // Show preview of what's being parsed. Merge into the existing
-        // pending item so previously detected fields aren't clobbered.
-        const items = splitMultipleItems(transcript);
-        const currentItem = items[items.length - 1] || '';
-        if (currentItem) {
-          const parsed = parseTranscription(currentItem);
-          if (parsed.size !== null || parsed.decade !== null) {
-            setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
-          }
-        }
-      }
-    };
-
-    recognition.onerror = (event: any) => {
-      if (event.error === 'not-allowed') {
-        setErrorMsg('Microphone access denied. Allow mic access in browser settings.');
-      } else if (event.error === 'no-speech') {
-        // Silence — restart recognition to keep listening
-        try { recognition.stop(); } catch {}
-        setTimeout(() => {
-          if (isListening) {
-            try { recognition.start(); } catch {}
-          }
-        }, 100);
-      } else if (event.error !== 'aborted') {
-        setErrorMsg(`Speech error: ${event.error}`);
-      }
-    };
-
-    recognition.onend = () => {
-      // Auto-restart if user hasn't stopped
-      // This handles Chrome's ~60s auto-cutoff for continuous recognition
-      if (isListening) {
-        setTimeout(() => {
-          try { recognition.start(); } catch {}
-        }, 100);
-      }
-    };
-
-    recognitionRef.current = recognition;
-    try {
-      recognition.start();
-    } catch {
-      setErrorMsg('Failed to start speech recognition.');
-    }
-  }
-
   // --- Handle a parsed item ---
   function handleParsedItem(parsed: ParsedItem) {
     // Read the LATEST pending item from the ref — NOT the closure-captured
-    // value. recognition.onresult is bound once at startWebSpeech() time and
-    // then keeps invoking handleParsedItem for the lifetime of the session,
-    // so any value read from this function's closure goes stale after the
-    // first state update.
+    // value. handleParsedItem is invoked from useEffect watchers that close
+    // over a stale pendingItem on every render; the ref always points at the
+    // current state.
     const previous = pendingItemRef.current;
 
     const previousIsComplete =
@@ -501,7 +380,7 @@ export default function RecordScreen() {
       pendingItemRef.current = null;
       setPendingItem(null);
       setLiveTranscript('');
-      if (Platform.OS !== 'web') nativeRecording.clearPendingItem();
+      recordingHook.clearPendingItem();
       haptic('parseSuccess');
     } catch {
       setErrorMsg('Failed to save item.');
@@ -519,7 +398,7 @@ export default function RecordScreen() {
     pendingItemRef.current = null;
     setPendingItem(null);
     setLiveTranscript('');
-    if (Platform.OS !== 'web') nativeRecording.clearPendingItem();
+    recordingHook.clearPendingItem();
   }
 
   // Clear is a confirmed reset — discardPending without the prompt is used
@@ -547,40 +426,27 @@ export default function RecordScreen() {
   // --- Render ---
   const totalValue = loggedItems.reduce((sum, i) => sum + (i.parsed.price ?? 0), 0);
 
-  // Status label is derived from the native recording phase on iOS/Android,
-  // and from local listening flags on web.
+  // Status label derived from the recording hook's phase.
   let statusLabel: string;
-  if (Platform.OS === 'web') {
-    statusLabel = recording
-      ? pendingItem
+  switch (recordingHook.phase) {
+    case 'connecting':
+      statusLabel = 'Connecting…';
+      break;
+    case 'listening':
+      statusLabel = pendingItem
         ? 'Item detected'
         : liveTranscript
           ? 'Hearing you…'
-          : 'Listening…'
-      : loggedItems.length > 0
-        ? 'Session paused'
-        : 'Ready';
-  } else {
-    switch (nativeRecording.phase) {
-      case 'connecting':
-        statusLabel = 'Connecting…';
-        break;
-      case 'listening':
-        statusLabel = pendingItem
-          ? 'Item detected'
-          : liveTranscript
-            ? 'Hearing you…'
-            : 'Listening…';
-        break;
-      case 'transcribing':
-        statusLabel = 'Transcribing…';
-        break;
-      case 'error':
-        statusLabel = 'Recording error';
-        break;
-      default:
-        statusLabel = loggedItems.length > 0 ? 'Session paused' : 'Ready';
-    }
+          : 'Listening…';
+      break;
+    case 'transcribing':
+      statusLabel = 'Transcribing…';
+      break;
+    case 'error':
+      statusLabel = 'Recording error';
+      break;
+    default:
+      statusLabel = loggedItems.length > 0 ? 'Session paused' : 'Ready';
   }
 
   return (
@@ -602,7 +468,7 @@ export default function RecordScreen() {
 
       {/* Transcribing overlay — shows after Stop while we wait for the
           ElevenLabs transcript to come back. */}
-      {Platform.OS !== 'web' && nativeRecording.phase === 'transcribing' && (
+      {recordingHook.phase === 'transcribing' && (
         <View style={styles.transcribingBanner}>
           <ActivityIndicator size="small" color={Colors.accent} />
           <Text style={styles.transcribingText}>Transcribing…</Text>
@@ -664,9 +530,6 @@ export default function RecordScreen() {
           <Text style={styles.hintText}>Tap Start and speak your items</Text>
         ) : null}
 
-        {Platform.OS === 'web' && !recording && loggedItems.length === 0 && (
-          <Text style={styles.webNote}>Using browser speech recognition (Chrome/Edge)</Text>
-        )}
       </View>
 
       {/* Pending item preview */}
@@ -715,11 +578,7 @@ export default function RecordScreen() {
                 onPress={async () => {
                   haptic('recordStart');
                   discardPending();
-                  if (Platform.OS === 'web') {
-                    startWebSpeech();
-                  } else {
-                    await nativeRecording.startRecording();
-                  }
+                  await recordingHook.startRecording();
                 }}
               >
                 <Text style={styles.retryText}>Try Again</Text>

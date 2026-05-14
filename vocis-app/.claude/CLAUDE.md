@@ -98,23 +98,25 @@ SQLite session
 
 ---
 
-## iOS Rules — Never Break
+## Platform Rules
 
-| BANNED | USE INSTEAD |
-|--------|-------------|
-| `window.*` (non-WS) | React Native globals / `Platform` checks |
-| `document.*` | React Native components |
-| `localStorage` / `sessionStorage` | `expo-secure-store` or `expo-sqlite` |
-| `navigator.mediaDevices.getUserMedia` | `expo-av Audio.Recording.createAsync()` |
-| `new AudioContext()` | `expo-av` |
-| `MediaRecorder` | `expo-av Audio.Recording` |
-| `new Blob([...])` + file save | `expo-file-system` `File.write()` |
-| `URL.createObjectURL()` | `expo-file-system` URI string |
-| `<a download=...>` in JSX | `expo-sharing shareAsync()` |
-| `window.confirm()` | `Alert.alert()` |
-| Direct `fetch()` to ElevenLabs | Must go through `sttProxy.ts` |
+The app is **web-only** (Chrome/Edge on desktop and mobile). The iOS-first
+ban on browser APIs has been retired — the recording pipeline now uses
+`getUserMedia` + `AudioContext` + `AudioWorklet` to deliver raw PCM 16 kHz
+mono to ElevenLabs via the Cloudflare Worker.
 
-Web Speech API (`SpeechRecognition`) is used in `record.tsx` but gated behind `Platform.OS === 'web'` — do not remove the gate.
+Still required:
+
+| RULE | REASON |
+|------|--------|
+| All ElevenLabs traffic via `sttProxy.ts` | Keeps the API key in the Worker secret store, off the client. |
+| WebSocket URL built by string concat in `sttProxy.ts`, not `new URL('/stream', 'wss://...')` | Hermes/RN's URL impl is unreliable for `wss:` schemes — see commit `a8bd5bf`. |
+| No direct `fetch()` to `api.elevenlabs.io` | Same reason — key must stay server-side. |
+
+The Web Speech API (`SpeechRecognition`) path has been removed; ElevenLabs
+is the only STT engine, so keyterm biasing (Carhartt, Patagonia, …) actually
+takes effect. The `useRecording` hook is web-only and uses an inline
+AudioWorklet (Blob URL) for PCM capture — see `src/hooks/useRecording.ts`.
 
 ---
 

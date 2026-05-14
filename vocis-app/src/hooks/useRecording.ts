@@ -1,6 +1,4 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
-import * as FileSystem from 'expo-file-system/legacy';
 import {
   ElevenLabsSTTService,
   ConnectionState,
@@ -25,12 +23,9 @@ export interface UseRecordingResult {
   isRecording: boolean;
   phase: RecordingPhase;
   connectionState: ConnectionState;
-  /** Live mic level in dB (-160 silent, ~0 max). Updates ~10× per second. */
   meteringDb: number;
   partialTranscript: string;
-  /** The current pending item (shown as preview, not yet confirmed) */
   pendingItem: ParsedItem | null;
-  /** Items auto-confirmed from continuous speech — consume these in the UI */
   confirmedItems: ParsedItem[];
   error: string | null;
   startRecording: () => Promise<void>;
@@ -40,29 +35,74 @@ export interface UseRecordingResult {
   clearError: () => void;
 }
 
-/** VAD thresholds — tuned for hand-held phone use in indoor environments. */
+const TARGET_SAMPLE_RATE = 16000;
 const SILENCE_THRESHOLD_DB = -40;
 const SPEECH_START_THRESHOLD_DB = -25;
 const SILENCE_DURATION_MS = 1500;
-/** Minimum speech duration before VAD will auto-stop, prevents nuisance cutoffs. */
 const MIN_SPEECH_DURATION_MS = 1000;
+const MIN_RECORDING_SAMPLES = TARGET_SAMPLE_RATE * 0.1;
+
+// Inline AudioWorklet that ships each 128-sample Float32 block from the mic
+// back to the main thread. Loaded via Blob URL so no separate file / bundler
+// configuration is needed.
+const PCM_WORKLET_SOURCE = `
+class PCMCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input[0] && input[0].length > 0) {
+      // slice(0) copies the buffer — the worklet reuses the same array
+      // each tick, so without a copy the main thread sees zeros.
+      this.port.postMessage(input[0].slice(0));
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PCMCaptureProcessor);
+`;
+
+function float32ToPcm16Bytes(float32: Float32Array): Uint8Array {
+  const bytes = new Uint8Array(float32.length * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < float32.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, float32[i]));
+    const int16 = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    view.setInt16(i * 2, int16, true);
+  }
+  return bytes;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    for (let j = 0; j < chunk.length; j++) {
+      binary += String.fromCharCode(chunk[j]);
+    }
+  }
+  return btoa(binary);
+}
+
+function rmsToDb(samples: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  const rms = Math.sqrt(sum / samples.length);
+  return rms > 0 ? 20 * Math.log10(rms) : -160;
+}
 
 /**
- * Hook that manages the full native recording pipeline:
- * Microphone → Audio chunks → WebSocket → Transcript → Parser
+ * Web recording pipeline:
+ *   getUserMedia → AudioContext(16 kHz) → AudioWorklet → Float32 PCM
+ *   → on stop: concat → Int16 PCM → base64 → ElevenLabsSTTService.sendFinalAudio
  *
- * Supports continuous rapid-fire mode:
- * - Partial transcripts update live for visual feedback
- * - Final transcripts are split into multiple items if detected
- * - Complete items (with price) are auto-confirmed
- * - Incomplete items become pending for manual review
- *
- * No audio is ever written to device storage.
+ * Mirrors the contract of the prior native (expo-av) hook so the call site
+ * in record.tsx can stay unchanged.
  */
 export function useRecording(): UseRecordingResult {
   const [isRecording, setIsRecording] = useState(false);
   const [phase, setPhase] = useState<RecordingPhase>('idle');
-  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
+  const [connectionState, setConnectionState] =
+    useState<ConnectionState>('disconnected');
   const [meteringDb, setMeteringDb] = useState<number>(-160);
   const [partialTranscript, setPartialTranscript] = useState('');
   const [pendingItem, setPendingItem] = useState<ParsedItem | null>(null);
@@ -70,105 +110,114 @@ export function useRecording(): UseRecordingResult {
   const [error, setError] = useState<string | null>(null);
 
   const sttService = useRef<ElevenLabsSTTService | null>(null);
-  const recording = useRef<Audio.Recording | null>(null);
+  const audioContext = useRef<AudioContext | null>(null);
+  const mediaStream = useRef<MediaStream | null>(null);
+  const workletNode = useRef<AudioWorkletNode | null>(null);
+  const sourceNode = useRef<MediaStreamAudioSourceNode | null>(null);
+  const muteGain = useRef<GainNode | null>(null);
+  const collectedSamples = useRef<Float32Array[]>([]);
+  const collectedSampleCount = useRef<number>(0);
   const speechStartedAt = useRef<number | null>(null);
   const silenceStartedAt = useRef<number | null>(null);
   const autoStopFired = useRef<boolean>(false);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      stopRecording();
-    };
-  }, []);
-
   const handleTranscript = useCallback((event: TranscriptEvent) => {
     if (event.type === 'partial') {
       setPartialTranscript(event.text);
-
-      // Show real-time preview of what's being parsed (visual only)
       const items = splitMultipleItems(event.text);
       const current = items[items.length - 1];
       if (current) {
         const parsed = parseTranscription(current);
         if (parsed.size !== null || parsed.decade !== null) {
-          // Merge into the existing pending item so partial transcripts
-          // accumulate fields rather than overwriting prior detections.
           setPendingItem((prev) => (prev ? mergeItems(prev, parsed) : parsed));
         }
       }
     } else if (event.type === 'final') {
       setPartialTranscript('');
-
-      // Split transcript into individual items
       const itemTexts = splitMultipleItems(event.text);
       const newConfirmed: ParsedItem[] = [];
       let lastIncomplete: ParsedItem | null = null;
-
       for (const text of itemTexts) {
         const parsed = parseTranscription(text);
-        if (parsed.price !== null) {
-          // Complete item — auto-confirm
-          newConfirmed.push(parsed);
-        } else {
-          // Incomplete — hold as pending
-          lastIncomplete = parsed;
-        }
+        if (parsed.price !== null) newConfirmed.push(parsed);
+        else lastIncomplete = parsed;
       }
-
-      // Batch-add confirmed items
       if (newConfirmed.length > 0) {
         setConfirmedItems((prev) => [...prev, ...newConfirmed]);
       }
-
-      // Merge the incomplete fragment into any prior pending item so the
-      // user can build one item up across multiple utterances.
       if (lastIncomplete) {
-        setPendingItem((prev) => (prev ? mergeItems(prev, lastIncomplete!) : lastIncomplete));
+        setPendingItem((prev) =>
+          prev ? mergeItems(prev, lastIncomplete!) : lastIncomplete
+        );
       }
     }
   }, []);
 
   const handleStateChange = useCallback((state: ConnectionState) => {
     setConnectionState(state);
+    if (state === 'connected') setPhase('listening');
   }, []);
 
   const handleError = useCallback((errorMsg: string) => {
     setError(errorMsg);
   }, []);
 
-  const handleMetering = useCallback((statusDb: number) => {
-    // Throttle React state updates: store every value but only re-render
-    // ~10× per second to keep the waveform smooth without thrashing the
-    // reconciler. setMeteringDb is cheap enough that we always call it.
-    setMeteringDb(statusDb);
+  // VAD: track speech onset → sustained silence → auto-stop.
+  // stopRecording is declared after this; we read the latest ref at fire time.
+  const stopRecordingRef = useRef<() => Promise<void>>(async () => {});
 
-    // VAD: detect first speech, then sustained silence → auto-stop.
-    if (statusDb > SPEECH_START_THRESHOLD_DB) {
-      if (speechStartedAt.current === null) {
-        speechStartedAt.current = Date.now();
-      }
+  const handleMetering = useCallback((db: number) => {
+    setMeteringDb(db);
+    if (db > SPEECH_START_THRESHOLD_DB) {
+      if (speechStartedAt.current === null) speechStartedAt.current = Date.now();
       silenceStartedAt.current = null;
       return;
     }
-
-    if (statusDb < SILENCE_THRESHOLD_DB && speechStartedAt.current !== null) {
+    if (db < SILENCE_THRESHOLD_DB && speechStartedAt.current !== null) {
       const speechDuration = Date.now() - speechStartedAt.current;
       if (speechDuration < MIN_SPEECH_DURATION_MS) return;
-
       if (silenceStartedAt.current === null) {
         silenceStartedAt.current = Date.now();
         return;
       }
-
       const silenceDuration = Date.now() - silenceStartedAt.current;
       if (silenceDuration > SILENCE_DURATION_MS && !autoStopFired.current) {
         autoStopFired.current = true;
-        console.log('[VAD] Sustained silence detected, auto-stopping');
-        // stopRecording is wrapped in useCallback below — deferred via setTimeout
-        // so React has a tick to re-render the "transcribing" state first.
-        setTimeout(() => stopRecording(), 0);
+        console.log('[VAD] Sustained silence — auto-stopping');
+        setTimeout(() => stopRecordingRef.current(), 0);
       }
+    }
+  }, []);
+
+  const teardownAudioGraph = useCallback(async () => {
+    if (workletNode.current) {
+      workletNode.current.port.onmessage = null;
+      try {
+        workletNode.current.disconnect();
+      } catch {}
+      workletNode.current = null;
+    }
+    if (sourceNode.current) {
+      try {
+        sourceNode.current.disconnect();
+      } catch {}
+      sourceNode.current = null;
+    }
+    if (muteGain.current) {
+      try {
+        muteGain.current.disconnect();
+      } catch {}
+      muteGain.current = null;
+    }
+    if (audioContext.current) {
+      try {
+        await audioContext.current.close();
+      } catch {}
+      audioContext.current = null;
+    }
+    if (mediaStream.current) {
+      mediaStream.current.getTracks().forEach((t) => t.stop());
+      mediaStream.current = null;
     }
   }, []);
 
@@ -182,201 +231,167 @@ export function useRecording(): UseRecordingResult {
       speechStartedAt.current = null;
       silenceStartedAt.current = null;
       autoStopFired.current = false;
+      collectedSamples.current = [];
+      collectedSampleCount.current = 0;
 
-      // Request microphone permission
-      const permission = await Audio.requestPermissionsAsync();
-      if (!permission.granted) {
-        setError('Microphone permission is required to record inventory items.');
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        setError(
+          'Microphone capture requires a modern browser (Chrome 95+, Edge 95+, Safari 14.1+).'
+        );
+        setPhase('error');
+        return;
+      }
+      if (typeof window === 'undefined' || typeof (window as unknown as { AudioContext?: unknown }).AudioContext === 'undefined') {
+        setError('AudioContext is not available in this browser.');
         setPhase('error');
         return;
       }
 
-      // Configure audio mode for clean speech capture: don't mix with other
-      // audio, don't duck Android volumes, don't keep mic alive in background.
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        shouldDuckAndroid: false,
-        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
-        playThroughEarpieceAndroid: false,
-        staysActiveInBackground: false,
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (err) {
+        console.error('[Recording] getUserMedia failed:', err);
+        setError(
+          'Microphone permission denied. Allow mic access in your browser settings.'
+        );
+        setPhase('error');
+        return;
+      }
+      mediaStream.current = stream;
+
+      const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      audioContext.current = ctx;
+
+      const workletBlob = new Blob([PCM_WORKLET_SOURCE], {
+        type: 'application/javascript',
       });
+      const workletUrl = URL.createObjectURL(workletBlob);
+      try {
+        await ctx.audioWorklet.addModule(workletUrl);
+      } finally {
+        URL.revokeObjectURL(workletUrl);
+      }
 
-      // Load user's keyterms once per session and pass them to the STT
-      // service so they can be sent in the WebSocket config.
+      const source = ctx.createMediaStreamSource(stream);
+      const worklet = new AudioWorkletNode(ctx, 'pcm-capture');
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+
+      worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        const pcm = event.data;
+        collectedSamples.current.push(pcm);
+        collectedSampleCount.current += pcm.length;
+        handleMetering(rmsToDb(pcm));
+      };
+
+      // Routing: mic → worklet → muted gain → destination.
+      // process() only fires when the node is in an active audio graph; the
+      // muted gain stage keeps the graph live without playback to speakers.
+      source.connect(worklet);
+      worklet.connect(gain);
+      gain.connect(ctx.destination);
+
+      sourceNode.current = source;
+      workletNode.current = worklet;
+      muteGain.current = gain;
+
       const keyterms = await KeytermsService.getAll().catch(() => []);
-
-      // Initialize STT service
       sttService.current = new ElevenLabsSTTService({
         onTranscript: handleTranscript,
         onStateChange: handleStateChange,
         onError: handleError,
       });
       sttService.current.setKeyterms(keyterms);
-
-      // Connect WebSocket
       await sttService.current.connect();
 
-      // Start recording — 16 kHz mono 16-bit linear PCM, MAX iOS quality.
-      const { recording: newRecording } = await Audio.Recording.createAsync(
-        {
-          isMeteringEnabled: true,
-          android: {
-            extension: '.wav',
-            outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-            audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-            sampleRate: 16000,
-            numberOfChannels: 1,
-            bitRate: 256000,
-          },
-          ios: {
-            extension: '.wav',
-            outputFormat: Audio.IOSOutputFormat.LINEARPCM,
-            audioQuality: Audio.IOSAudioQuality.MAX,
-            sampleRate: 16000,
-            numberOfChannels: 1,
-            bitRate: 256000,
-            linearPCMBitDepth: 16,
-            linearPCMIsBigEndian: false,
-            linearPCMIsFloat: false,
-          },
-          web: {
-            mimeType: 'audio/webm',
-            bitsPerSecond: 128000,
-          },
-        },
-        // status callback — fires as long as the recording is active.
-        (status) => {
-          if (status.isRecording && typeof status.metering === 'number') {
-            handleMetering(status.metering);
-          }
-        },
-        100 // status update interval (ms) — 10 samples per second is plenty for VAD.
-      );
-
-      recording.current = newRecording;
       setIsRecording(true);
-      setPhase('listening');
-      // Audio is read and sent in stopRecording() after the recording file is complete.
-      // On iOS/Expo Go the recording file does not grow on disk during active recording
-      // (the OS buffers audio internally), so streaming from the file mid-recording
-      // yields empty reads. Reading the complete file after stop is the reliable approach.
+      // phase moves to 'listening' on connectionState === 'connected'.
     } catch (err) {
+      console.error('[Recording] start failed:', err);
+      await teardownAudioGraph();
       setError('Failed to start recording. Please try again.');
       setIsRecording(false);
       setPhase('error');
     }
-  }, [handleTranscript, handleStateChange, handleError, handleMetering]);
+  }, [
+    handleTranscript,
+    handleStateChange,
+    handleError,
+    handleMetering,
+    teardownAudioGraph,
+  ]);
 
   const stopRecording = useCallback(async () => {
-    // Capture the URI before stopping — expo-av clears it after unload.
-    const audioUri = recording.current?.getURI() ?? null;
+    setPhase('transcribing');
+    await teardownAudioGraph();
 
-    if (recording.current) {
-      setPhase('transcribing');
+    if (sttService.current && collectedSampleCount.current > 0) {
       try {
-        await recording.current.stopAndUnloadAsync();
-      } catch {
-        // Already stopped
-      }
-      recording.current = null;
-    }
-
-    if (sttService.current) {
-      if (audioUri) {
-        try {
-          // Read the complete WAV file as base64.
-          // Do NOT use the `position` option — it is unreliable in expo-file-system/legacy
-          // and causes the WAV header to leak into the audio data sent to ElevenLabs.
-          const base64Wav = await FileSystem.readAsStringAsync(
-            audioUri,
-            { encoding: FileSystem.EncodingType.Base64 }
-          );
-
-          // Decode base64 → raw bytes so we can inspect and strip the WAV header.
-          const binaryStr = atob(base64Wav);
-          const wavBytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) {
-            wavBytes[i] = binaryStr.charCodeAt(i);
-          }
-
-          // Verify the file is a valid WAV (RIFF magic bytes at offset 0).
-          const header = String.fromCharCode(wavBytes[0], wavBytes[1], wavBytes[2], wavBytes[3]);
-          console.log('[Recording] File header:', header, '— total bytes:', wavBytes.length);
-
-          // Strip the 44-byte WAV header — ElevenLabs requires raw PCM only.
-          const WAV_HEADER_SIZE = 44;
-          const pcmBytes = wavBytes.slice(WAV_HEADER_SIZE);
-
-          // 16kHz mono 16-bit PCM: 1 second = 16000 samples × 2 bytes = 32000 bytes.
-          const durationSecs = pcmBytes.length / (16000 * 2);
-          console.log('[Recording] PCM bytes:', pcmBytes.length);
-          console.log('[Recording] Audio duration:', durationSecs.toFixed(2), 'seconds');
-
-          if (pcmBytes.length < 3200) { // < 0.1 seconds
-            console.warn('[Recording] Audio too short — skipping');
-            setError('Recording too short. Please speak for at least 1 second.');
-          } else {
-            // Re-encode PCM bytes → base64 in chunks to avoid call-stack overflow
-            // on large recordings (String.fromCharCode spread crashes above ~100k bytes).
-            const bytesToBase64 = (bytes: Uint8Array): string => {
-              let binary = '';
-              const chunkSize = 8192;
-              for (let i = 0; i < bytes.length; i += chunkSize) {
-                const chunk = bytes.slice(i, i + chunkSize);
-                chunk.forEach((b) => { binary += String.fromCharCode(b); });
-              }
-              return btoa(binary);
-            };
-
-            const pcmBase64 = bytesToBase64(pcmBytes);
-            console.log('[Recording] Sending PCM base64 length:', pcmBase64.length);
-            // Send audio + commit in ONE message — ElevenLabs commits only the audio
-            // present in the commit:true message. Splitting into sendAudio + flush
-            // results in committing an empty buffer (0.00s audio).
-            sttService.current.sendFinalAudio(pcmBase64);
-            console.log('[Recording] PCM audio sent with commit:true, waiting for transcript...');
-          }
-        } catch (err) {
-          console.error('[Recording] Failed to read audio file:', err);
-          setError('Failed to process recording. Please try again.');
-        } finally {
-          // Delete the temp WAV file immediately after reading — audio must not
-          // persist on device storage beyond the recording session.
-          try {
-            await FileSystem.deleteAsync(audioUri, { idempotent: true });
-            console.log('[Recording] Temp audio file deleted');
-          } catch {
-            // Best-effort — OS will clean up temp files eventually
-          }
+        const total = collectedSampleCount.current;
+        const combined = new Float32Array(total);
+        let offset = 0;
+        for (const buf of collectedSamples.current) {
+          combined.set(buf, offset);
+          offset += buf.length;
         }
+        const durationSecs = combined.length / TARGET_SAMPLE_RATE;
+        console.log(
+          '[Recording] PCM samples:',
+          combined.length,
+          '— duration:',
+          durationSecs.toFixed(2),
+          's'
+        );
+
+        if (combined.length < MIN_RECORDING_SAMPLES) {
+          console.warn('[Recording] Audio too short — skipping');
+          setError('Recording too short. Please speak for at least 1 second.');
+        } else {
+          const pcmBytes = float32ToPcm16Bytes(combined);
+          const pcmBase64 = bytesToBase64(pcmBytes);
+          console.log('[Recording] Sending PCM base64 length:', pcmBase64.length);
+          sttService.current.sendFinalAudio(pcmBase64);
+          console.log('[Recording] PCM audio sent, waiting for transcript…');
+        }
+      } catch (err) {
+        console.error('[Recording] Failed to encode audio:', err);
+        setError('Failed to process recording. Please try again.');
       }
-
-      // Give ElevenLabs time to process the audio and return the transcript.
-      setTimeout(() => {
-        sttService.current?.disconnect();
-        sttService.current = null;
-      }, 3000);
     }
 
-    try {
-      // Fully restore audio mode so the OS frees the mic and silent-mode
-      // playback returns to its app-default behaviour.
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: false,
-      });
-    } catch {
-      // Ignore cleanup errors
-    }
+    collectedSamples.current = [];
+    collectedSampleCount.current = 0;
+
+    // Give ElevenLabs ~3s to return the final transcript before closing.
+    setTimeout(() => {
+      sttService.current?.disconnect();
+      sttService.current = null;
+    }, 3000);
 
     setIsRecording(false);
     setMeteringDb(-160);
     speechStartedAt.current = null;
     silenceStartedAt.current = null;
-    // Don't blow away an 'error' phase — only return to idle from listening/transcribing.
     setPhase((p) => (p === 'listening' || p === 'transcribing' ? 'idle' : p));
+  }, [teardownAudioGraph]);
+
+  useEffect(() => {
+    stopRecordingRef.current = stopRecording;
+  }, [stopRecording]);
+
+  useEffect(() => {
+    return () => {
+      stopRecording();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const clearPendingItem = useCallback(() => {
