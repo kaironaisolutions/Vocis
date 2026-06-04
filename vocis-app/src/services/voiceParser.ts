@@ -647,31 +647,68 @@ function parseSegmented(cleaned: string): ParsedItem {
   let price: number | null = null;
   const claimed = new Set<number>();
 
-  // Size detection: try full-segment match first ("Medium"), then fall
-  // back to word-level scan inside each segment so messy comma usage
-  // ("Large 90s, 1992.") still finds "Large" instead of leaving size=null.
-  // On a word-level hit we splice the size word out of the segment so it
-  // doesn't leak into item_name, but leave the rest available for decade/
-  // price/item-name detection.
+  // Size detection: scan 3-word, 2-word, then 1-word phrases INSIDE each
+  // segment via direct EXTENDED_SIZE_MAP lookup, and splice the matched
+  // word(s) out — leaving the rest of the segment for decade/price/
+  // item-name detection. Calling parseSize on the whole segment is unsafe:
+  // its multi-word phrase loop uses .includes() against SIZE_MULTI_WORD,
+  // so "extra large 70s Polo bomber" would match "extra large" inside the
+  // segment and we'd then claim the entire segment, swallowing the brand
+  // and garment words and leaving item_name=null. The 3→2→1 word scan
+  // handles "double extra large", "extra small", and bare "medium"
+  // without that hazard. Mirrors the decade word-splice pattern below.
   for (let i = 0; i < segments.length && size === null; i++) {
-    const parsed = parseSize(segments[i]);
-    if (parsed) { size = parsed; claimed.add(i); break; }
+    if (claimed.has(i)) continue;
+    const words = segments[i].split(/\s+/);
+    const strip = (s: string): string =>
+      s.toLowerCase().replace(/^[.,;!?]+|[.,;!?]+$/g, '');
+    for (let j = 0; j < words.length; j++) {
+      if (j + 2 < words.length) {
+        const three = `${strip(words[j])} ${strip(words[j + 1])} ${strip(words[j + 2])}`;
+        if (EXTENDED_SIZE_MAP[three]) {
+          size = EXTENDED_SIZE_MAP[three];
+          words.splice(j, 3);
+          break;
+        }
+      }
+      if (j + 1 < words.length) {
+        const two = `${strip(words[j])} ${strip(words[j + 1])}`;
+        if (EXTENDED_SIZE_MAP[two]) {
+          size = EXTENDED_SIZE_MAP[two];
+          words.splice(j, 2);
+          break;
+        }
+      }
+      const one = strip(words[j]);
+      if (EXTENDED_SIZE_MAP[one]) {
+        size = EXTENDED_SIZE_MAP[one];
+        words.splice(j, 1);
+        break;
+      }
+    }
+    if (size !== null) segments[i] = words.join(' ');
+  }
+
+  // Decade detection: scan word-by-word INSIDE each segment, splice the
+  // matched decade token out, and leave the rest of the segment for
+  // item-name extraction. Calling parseDecade on a multi-word segment is
+  // unsafe — parseDecade falls back to `.includes()` against decade keys,
+  // so "90s hoodie" would match key "90s" and we'd claim the whole segment,
+  // swallowing "hoodie" alongside the decade and leaving item_name=null.
+  // Mirrors the word-splice pattern that size detection uses above.
+  for (let i = 0; i < segments.length && decade === null; i++) {
+    if (claimed.has(i)) continue;
     const words = segments[i].split(/\s+/);
     for (let j = 0; j < words.length; j++) {
-      const wordSize = parseSize(words[j]);
-      if (wordSize) {
-        size = wordSize;
+      const stripped = words[j].replace(/^[.,;!?]+|[.,;!?]+$/g, '');
+      const wordDecade = parseDecade(stripped);
+      if (wordDecade) {
+        decade = wordDecade;
         words.splice(j, 1);
         segments[i] = words.join(' ');
         break;
       }
     }
-  }
-
-  for (let i = 0; i < segments.length; i++) {
-    if (claimed.has(i)) continue;
-    const parsed = parseDecade(segments[i]);
-    if (parsed) { decade = parsed; claimed.add(i); break; }
   }
 
   for (let i = segments.length - 1; i >= 0; i--) {
@@ -1036,26 +1073,54 @@ export function splitMultipleItems(transcript: string): string[] {
     'small', 'medium', 'large', 'xs', 'xl', 'xxl', '2xl',
     'extra',
   ]);
+  const priceWordSet = new Set(['dollars', 'dollar', 'bucks', 'buck']);
+
+  // A would-be split piece only counts as a "real" item if it contains at
+  // least one content word — anything that ISN'T a digit, number-word
+  // ("three", "hundred"), price indicator ("dollars"), or grammatical glue
+  // ("and"). Without this guard, price-first natural speech like "Three
+  // hundred dollars, medium 90s hoodie" splits at the dollars→medium
+  // boundary into ["Three hundred dollars,", "medium 90s hoodie"]: the
+  // first piece has no item_name so it gets dropped, and the second piece
+  // has no price — so the row lands with price=0.
+  const hasItemContent = (slice: string[]): boolean => {
+    return slice.some((w) => {
+      const lower = w.toLowerCase().replace(/[$,.;!?]/g, '');
+      if (lower === '') return false;
+      if (/^\d+(?:\.\d+)?$/.test(lower)) return false;
+      if (WORD_NUMBERS[lower] !== undefined) return false;
+      if (MULTIPLIERS[lower] !== undefined) return false;
+      if (priceWordSet.has(lower)) return false;
+      if (lower === 'and') return false;
+      return true;
+    });
+  };
 
   const items: string[] = [];
   let currentStart = 0;
   let lastPriceEnd = -1;
 
   for (let i = 0; i < words.length; i++) {
-    const word = words[i].toLowerCase().replace(/[$,]/g, '');
+    const word = words[i]
+      .toLowerCase()
+      .replace(/[$,]/g, '')
+      .replace(/[.,;!?]+$/, '');
 
     const isNumber = !isNaN(parseFloat(word)) && parseFloat(word) > 0;
-    const isPriceWord = ['dollars', 'dollar', 'bucks'].includes(word);
+    const isPriceWord = priceWordSet.has(word);
 
     if (isNumber || isPriceWord) {
       lastPriceEnd = i;
     }
 
     if (lastPriceEnd >= 0 && i > lastPriceEnd && sizeWords.has(word)) {
-      const itemText = words.slice(currentStart, i).join(' ').trim();
-      if (itemText) items.push(itemText);
-      currentStart = i;
-      lastPriceEnd = -1;
+      const firstHalf = words.slice(currentStart, i);
+      if (hasItemContent(firstHalf)) {
+        const itemText = firstHalf.join(' ').trim();
+        if (itemText) items.push(itemText);
+        currentStart = i;
+        lastPriceEnd = -1;
+      }
     }
   }
 

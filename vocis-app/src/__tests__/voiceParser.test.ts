@@ -9,6 +9,7 @@ import {
   formatRawTitle,
   correctMishears,
   dedupeCommittedTranscript,
+  splitMultipleItems,
   ParsedItem,
 } from '../services/voiceParser';
 
@@ -363,6 +364,82 @@ describe('buildItemFromTranscripts — real user flows', () => {
     expect(item.size).toBe('XL');
     expect(item.size).not.toBe('L');
     expect(item.item_name?.toLowerCase()).toContain('starter');
+  });
+
+  // Regression: a comma between the item and the price used to make the
+  // segmented parser claim the entire size+decade+item segment for the
+  // decade (parseDecade's .includes() loop matched "90s" inside "90s
+  // hoodie"), so item_name came out null and the row never saved.
+  it('FLOW 11: short-form decade + item + price all in one comma-segmented breath', () => {
+    const r = parseTranscript('Medium 90s hoodie, 300 dollars');
+    expect(r.size).toBe('M');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(300);
+    expect(r.item_name?.toLowerCase()).toContain('hoodie');
+  });
+
+  it('FLOW 11b: same shape with brand sandwiched between size and decade', () => {
+    const r = parseTranscript('Small YSL 90s jacket, 300 dollars');
+    expect(r.size).toBe('S');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(300);
+    expect(r.item_name?.toLowerCase()).toContain('ysl');
+    expect(r.item_name?.toLowerCase()).toContain('jacket');
+  });
+
+  // Regression: multi-word size in a comma-segmented utterance used to claim
+  // the entire size+decade+item segment via parseSize's .includes() loop
+  // matching "extra large" inside "extra large 70s Polo bomber", leaving
+  // decade=null and item_name=null. End Session would then save the row with
+  // the *previous* item's name (via the stale-pendingItem leak).
+  it('FLOW 12: multi-word size + short-decade + item all in one segment', () => {
+    const r = parseTranscript('Extra large 70s Polo bomber, 200 dollars');
+    expect(r.size).toBe('XL');
+    expect(r.decade).toBe("70's");
+    expect(r.price).toBe(200);
+    expect(r.item_name?.toLowerCase()).toContain('polo');
+    expect(r.item_name?.toLowerCase()).toContain('bomber');
+  });
+
+  // Regression: price-first natural speech used to be split by
+  // splitMultipleItems into a price-only piece (dropped because no item_name)
+  // and an item-only piece (saved with price=0). Both halves must land in
+  // a single saved row.
+  it('FLOW 13: price-first natural speech keeps the price', () => {
+    const r = parseTranscript("Three hundred dollars, medium, '90s hoodie");
+    expect(r.size).toBe('M');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(300);
+    expect(r.item_name?.toLowerCase()).toContain('hoodie');
+  });
+});
+
+describe('splitMultipleItems', () => {
+  // Tightening guard added for Bug C: don't split if the would-be first
+  // piece is just a price phrase (no brand/garment/size content).
+  it('does NOT split price-first single-item speech', () => {
+    const out = splitMultipleItems(
+      "Three hundred dollars, medium, '90s hoodie"
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('hoodie');
+    expect(out[0]).toContain('dollars');
+  });
+
+  it('does NOT split when only price words precede the next size', () => {
+    const out = splitMultipleItems('seventy five dollars large Nike tee');
+    expect(out).toHaveLength(1);
+  });
+
+  // Regression guard for the still-valid multi-item case — the tightening
+  // must not break ACTUAL multi-item utterances.
+  it('DOES split when a real item with a name precedes the price+size boundary', () => {
+    const out = splitMultipleItems(
+      'Medium 90s hoodie 75 dollars large Nike tee 50 dollars'
+    );
+    expect(out.length).toBeGreaterThanOrEqual(2);
+    expect(out[0].toLowerCase()).toContain('hoodie');
+    expect(out[1].toLowerCase()).toContain('nike');
   });
 });
 

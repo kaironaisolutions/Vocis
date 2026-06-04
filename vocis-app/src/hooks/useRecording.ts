@@ -150,11 +150,34 @@ export function useRecording(): UseRecordingResult {
   // Initialized in startRecording so the user gets a grace period before
   // the timer starts ticking.
   const lastSpeechAt = useRef<number>(0);
+  // Text of the most recently committed transcript. Used to drop
+  // duplicate partials that ElevenLabs occasionally re-emits *after* a
+  // committed_transcript — without this, the duplicate would repopulate
+  // pendingItem with the just-saved item, and pickItemName's longer-wins
+  // rule would carry the stale name across the next utterance's partials.
+  // End Session would then save the next item with the previous item's
+  // name. Reset to '' in startRecording.
+  const lastCommittedTextRef = useRef<string>('');
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
     if (event.type === 'partial') {
-      setPartialTranscript(event.text);
-      const items = splitMultipleItems(event.text);
+      const text = event.text.trim();
+      // Drop duplicate post-commit partials. ElevenLabs sometimes re-sends
+      // the just-committed text as a "partial" right after the
+      // committed_transcript event. If we don't filter it, the duplicate
+      // repopulates pendingItem with the prior (already-saved) item and
+      // pickItemName keeps that name across the next utterance — so the
+      // End Session save can come out labeled with the wrong garment.
+      const normalize = (s: string) =>
+        s.replace(/[.,;!?]+$/, '').toLowerCase().trim();
+      if (
+        text === '' ||
+        normalize(text) === normalize(lastCommittedTextRef.current)
+      ) {
+        return;
+      }
+      setPartialTranscript(text);
+      const items = splitMultipleItems(text);
       const current = items[items.length - 1];
       if (current) {
         const parsed = parseTranscription(current);
@@ -164,6 +187,7 @@ export function useRecording(): UseRecordingResult {
       }
     } else if (event.type === 'final') {
       console.log('[SESSION] handleTranscript: final received:', JSON.stringify(event.text));
+      lastCommittedTextRef.current = event.text;
       setPartialTranscript('');
       // Auto-save flow: every committed transcript with an item_name goes
       // straight into confirmedItems. record.tsx auto-saves them via DB,
@@ -297,6 +321,7 @@ export function useRecording(): UseRecordingResult {
       collectedSampleCount.current = 0;
       unsentSamples.current = [];
       unsentSampleCount.current = 0;
+      lastCommittedTextRef.current = '';
 
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
         setError(
