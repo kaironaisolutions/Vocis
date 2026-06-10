@@ -33,6 +33,12 @@ describe('validateItem', () => {
     expect(result.warnings.some((w) => w.includes('not a standard size'))).toBe(true);
   });
 
+  it('accepts waist x inseam sizes without warning', () => {
+    const result = validateItem({ ...validItem, size: '34x30' });
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toHaveLength(0);
+  });
+
   it('errors on empty decade', () => {
     const result = validateItem({ ...validItem, decade: '' });
     expect(result.valid).toBe(false);

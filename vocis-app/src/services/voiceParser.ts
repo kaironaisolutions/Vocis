@@ -352,9 +352,155 @@ const SIZE_SINGLE_WORD = [
   'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', '2xl', 'os',
 ];
 
+// ─── Waist x inseam pant sizes ───────────────────────────────────────────────
+//
+// Vintage resellers sell jeans/pants/shorts with waist-by-inseam sizes
+// ("34x30"). Detection must run BEFORE the letter-size dictionary and BEFORE
+// price detection so the two numbers aren't read as a price.
+//
+// Accepted spoken forms (all normalize to canonical "WxL"):
+//   "34x30" / "34 x 30"          compact
+//   "32 by 30" / "34 by 32"      digits + connector
+//   "thirty four by thirty"      spoken numbers + connector
+//   "thirty four thirty"         spoken numbers adjacent
+//   "size 34 30"                 size-prefixed pair
+//   "waist 32 inseam 30"         explicit waist/inseam
+//
+// Guards:
+//   - waist 20–50, inseam 26–40 (covers every combination in the 4,503-item
+//     real inventory; excludes decades 60–90 and most prices)
+//   - a price indicator ("dollars", "$") adjacent to the numbers means
+//     price, not size
+//   - decade/year tokens ("90s", "1990") never match — the number reader
+//     only accepts bare 1–2 digit tokens and tens words up to fifty
+
+const WAIST_MIN = 20;
+const WAIST_MAX = 50;
+const INSEAM_MIN = 26;
+const INSEAM_MAX = 40;
+
+const WAIST_TENS_WORDS: Record<string, number> = {
+  twenty: 20, thirty: 30, forty: 40, fifty: 50,
+};
+const WAIST_ONES_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9,
+};
+
+const COMPACT_WAIST_RE = /^(\d{2})x(\d{2})$/;
+
+function stripToken(word: string): string {
+  return word.toLowerCase().replace(/^[.,;!?]+|[.,;!?]+$/g, '');
+}
+
+function isWaist(n: number): boolean {
+  return n >= WAIST_MIN && n <= WAIST_MAX;
+}
+
+function isInseam(n: number): boolean {
+  return n >= INSEAM_MIN && n <= INSEAM_MAX;
+}
+
+/** True when words[i] signals price context ("$80", "dollars", "bucks"). */
+function isPriceContext(words: string[], i: number): boolean {
+  if (i < 0 || i >= words.length) return false;
+  if (words[i].includes('$')) return true;
+  return PRICE_INDICATORS.has(stripToken(words[i]));
+}
+
+/**
+ * Read a waist/inseam-shaped number starting at words[i]: either a bare
+ * 1–2 digit token ("34") or a tens word optionally followed by a ones word
+ * ("thirty four" → 34). Returns the value and the last index consumed.
+ * 4-digit years and decade tokens ("90s") never match.
+ */
+function readWaistNumber(
+  words: string[],
+  i: number,
+  consumed: Set<number>
+): { value: number; end: number } | null {
+  if (i < 0 || i >= words.length || consumed.has(i)) return null;
+  if (words[i].includes('$')) return null;
+
+  const w = stripToken(words[i]);
+  if (/^\d{1,2}$/.test(w)) return { value: parseInt(w, 10), end: i };
+
+  const tens = WAIST_TENS_WORDS[w];
+  if (tens === undefined) return null;
+  if (i + 1 < words.length && !consumed.has(i + 1)) {
+    const ones = WAIST_ONES_WORDS[stripToken(words[i + 1])];
+    if (ones !== undefined) return { value: tens + ones, end: i + 1 };
+  }
+  return { value: tens, end: i };
+}
+
+/**
+ * Scan a word array for a waist x inseam size. Returns the canonical "WxL"
+ * value plus the [start, end] index span of the matched words so callers
+ * can consume/splice them.
+ */
+function detectWaistSizeInWords(
+  words: string[],
+  consumed: Set<number>
+): { value: string; start: number; end: number } | null {
+  for (let i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+    const w = stripToken(words[i]);
+
+    // Compact single token: "34x30"
+    const compact = w.match(COMPACT_WAIST_RE);
+    if (compact) {
+      const waist = parseInt(compact[1], 10);
+      const inseam = parseInt(compact[2], 10);
+      if (isWaist(waist) && isInseam(inseam)) {
+        return { value: `${waist}x${inseam}`, start: i, end: i };
+      }
+      continue;
+    }
+
+    // Explicit "waist W [inseam] L"
+    if (w === 'waist') {
+      const first = readWaistNumber(words, i + 1, consumed);
+      if (first && isWaist(first.value)) {
+        let j = first.end + 1;
+        if (j < words.length && !consumed.has(j) && stripToken(words[j]) === 'inseam') j++;
+        const second = readWaistNumber(words, j, consumed);
+        if (second && isInseam(second.value) && !isPriceContext(words, second.end + 1)) {
+          return { value: `${first.value}x${second.value}`, start: i, end: second.end };
+        }
+      }
+      continue;
+    }
+
+    // General pair: W ["by"|"x"] L — digits or spoken numbers. "by"/"x" is
+    // optional so "thirty four thirty" and "size 34 30" match too.
+    const first = readWaistNumber(words, i, consumed);
+    if (!first || !isWaist(first.value)) continue;
+    let j = first.end + 1;
+    if (j < words.length && !consumed.has(j)) {
+      const conn = stripToken(words[j]);
+      if (conn === 'by' || conn === 'x') j++;
+    }
+    const second = readWaistNumber(words, j, consumed);
+    if (!second || !isInseam(second.value)) continue;
+    // Price guard: "thirty four thirty dollars" is a price phrase.
+    if (isPriceContext(words, second.end + 1)) continue;
+    // Fold a preceding "size" token into the match ("size 34 30").
+    const start =
+      i > 0 && !consumed.has(i - 1) && stripToken(words[i - 1]) === 'size' ? i - 1 : i;
+    return { value: `${first.value}x${second.value}`, start, end: second.end };
+  }
+  return null;
+}
+
 export function parseSize(text: string): string | null {
   const lower = text.toLowerCase().trim();
   if (lower === '') return null;
+
+  // Waist x inseam runs before the letter-size dictionary so the numbers
+  // aren't mistaken for anything else.
+  const waist = detectWaistSizeInWords(lower.split(/\s+/), new Set());
+  if (waist) return waist.value;
 
   if (EXTENDED_SIZE_MAP[lower]) return EXTENDED_SIZE_MAP[lower];
 
@@ -647,6 +793,19 @@ function parseSegmented(cleaned: string): ParsedItem {
   let price: number | null = null;
   const claimed = new Set<number>();
 
+  // Waist x inseam sizes first ("34x30", "32 by 30") — splice the matched
+  // word(s) out of the segment, mirroring the letter-size scan below.
+  for (let i = 0; i < segments.length && size === null; i++) {
+    if (claimed.has(i)) continue;
+    const words = segments[i].split(/\s+/);
+    const waist = detectWaistSizeInWords(words, new Set());
+    if (waist) {
+      size = waist.value;
+      words.splice(waist.start, waist.end - waist.start + 1);
+      segments[i] = words.join(' ');
+    }
+  }
+
   // Size detection: scan 3-word, 2-word, then 1-word phrases INSIDE each
   // segment via direct EXTENDED_SIZE_MAP lookup, and splice the matched
   // word(s) out — leaving the rest of the segment for decade/price/
@@ -763,16 +922,28 @@ function parseWordByWord(text: string): ParsedItem {
     }
   }
 
-  // "size N" pattern
-  for (let i = 0; i < words.length - 1; i++) {
-    if (consumed.has(i) || consumed.has(i + 1)) continue;
-    if (words[i].toLowerCase() !== 'size') continue;
-    const next = words[i + 1].replace(/[^\d]/g, '');
-    const num = parseInt(next, 10);
-    if (!isNaN(num) && num > 0 && num <= 60) {
-      size = String(num);
-      consumed.add(i); consumed.add(i + 1);
-      break;
+  // Waist x inseam size ("34x30", "32 by 30", "thirty four by thirty") —
+  // before the "size N" pattern and letter sizes so the numbers aren't
+  // claimed as a bare "size N" or leak into price detection.
+  const waist = detectWaistSizeInWords(words, consumed);
+  if (waist) {
+    size = waist.value;
+    for (let j = waist.start; j <= waist.end; j++) consumed.add(j);
+  }
+
+  // "size N" pattern (single number — "size 34 30" pairs are claimed by
+  // the waist scan above)
+  if (size === null) {
+    for (let i = 0; i < words.length - 1; i++) {
+      if (consumed.has(i) || consumed.has(i + 1)) continue;
+      if (words[i].toLowerCase() !== 'size') continue;
+      const next = words[i + 1].replace(/[^\d]/g, '');
+      const num = parseInt(next, 10);
+      if (!isNaN(num) && num > 0 && num <= 60) {
+        size = String(num);
+        consumed.add(i); consumed.add(i + 1);
+        break;
+      }
     }
   }
 

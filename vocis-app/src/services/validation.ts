@@ -12,6 +12,9 @@ VALID_SIZES.add('?' as never);
 
 const VALID_DECADE_PATTERN = /^(\d{2,4})'s$|^\?$/;
 
+// Waist x inseam pant sizes ("34x30") are valid alongside letter sizes.
+const WAIST_SIZE_PATTERN = /^\d{2}x\d{2}$/;
+
 /**
  * Validate all parsed inventory item fields before writing to the database.
  * Returns errors (block save) and warnings (allow save with user confirmation).
@@ -32,8 +35,11 @@ export function validateItem(fields: {
     errors.push('Size is too long (max 10 characters).');
   } else if (fields.size === '?') {
     warnings.push('Size could not be detected. Please verify.');
-  } else if (!VALID_SIZES.has(fields.size as never)) {
-    warnings.push(`"${fields.size}" is not a standard size (XS, S, M, L, XL, XXL).`);
+  } else if (
+    !VALID_SIZES.has(fields.size as never) &&
+    !WAIST_SIZE_PATTERN.test(fields.size)
+  ) {
+    warnings.push(`"${fields.size}" is not a standard size (XS, S, M, L, XL, XXL, or waist x inseam like 34x30).`);
   }
 
   // Decade validation

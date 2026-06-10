@@ -18,7 +18,16 @@ export interface Session {
 
 export type ExportFormat = 'custom' | 'shopify' | 'ebay';
 
-export type Size = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
+export type LetterSize = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
+
+/**
+ * Waist x inseam pant size, e.g. "34x30". Combinations are dynamic so they
+ * can't be enumerated; runtime range validation lives in the parser
+ * (waist 20–50, inseam 26–40) and validation.ts (shape check).
+ */
+export type WaistSize = `${number}x${number}`;
+
+export type Size = LetterSize | WaistSize;
 
 export const SIZE_MAP: Record<string, Size> = {
   'extra small': 'XS',

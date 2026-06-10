@@ -725,6 +725,7 @@ const styles = StyleSheet.create({
     color: Colors.text,
     fontSize: 16,
     fontWeight: '700',
+    textAlign: 'center',
   },
   transcriptBubble: {
     backgroundColor: Colors.surfaceLight,

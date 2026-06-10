@@ -73,6 +73,32 @@ describe('parseSize', () => {
   });
 });
 
+describe('parseSize — waist x inseam', () => {
+  const cases: [string, string | null][] = [
+    ['34x30', '34x30'],
+    ['34 x 30', '34x30'],
+    ['32 by 30', '32x30'],
+    ['34 by 32', '34x32'],
+    ['thirty four by thirty', '34x30'],
+    ['thirty four thirty', '34x30'],
+    ['waist 32 inseam 30', '32x30'],
+    ['waist 32 30', '32x30'],
+    // Out-of-range pairs are not sizes
+    ['90x30', null],   // waist beyond 50
+    ['34x50', null],   // inseam beyond 40
+    ['12x30', null],   // waist below 20
+    // Decades and years are never waist sizes
+    ['90s', null],
+    ['1990', null],
+    // Prices are never waist sizes
+    ['eighty five dollars', null],
+    ['thirty four thirty dollars', null],
+  ];
+  test.each(cases)('parseSize("%s") → %s', (input, expected) => {
+    expect(parseSize(input)).toBe(expected);
+  });
+});
+
 describe('parseDecade', () => {
   const cases: [string, string | null][] = [
     ['seventies', "70's"],
@@ -107,6 +133,91 @@ describe('parseTranscript — size detection', () => {
   ];
   test.each(cases)('"%s" → %s', (input, expected) => {
     expect(parseTranscript(input).size).toBe(expected);
+  });
+});
+
+describe('parseTranscript — waist x inseam sizes', () => {
+  it('"Dickies carpenter pants 34x30 fifty dollars" → full item', () => {
+    const r = parseTranscript('Dickies carpenter pants 34x30 fifty dollars');
+    expect(r.size).toBe('34x30');
+    expect(r.price).toBe(50);
+    expect(r.item_name?.toLowerCase()).toContain('dickies');
+  });
+
+  it('"34 by 32 jeans" → size 34x32, name Jeans', () => {
+    const r = parseTranscript('34 by 32 jeans');
+    expect(r.size).toBe('34x32');
+    expect(r.item_name?.toLowerCase()).toContain('jeans');
+  });
+
+  it('"32 by 30" → size 32x30', () => {
+    expect(parseTranscript('32 by 30').size).toBe('32x30');
+  });
+
+  it('"size 34 30" → size 34x30, not size 34 + price 30', () => {
+    const r = parseTranscript('size 34 30');
+    expect(r.size).toBe('34x30');
+    expect(r.price).toBeNull();
+  });
+
+  it('"thirty four by thirty" → size 34x30, no price', () => {
+    const r = parseTranscript('thirty four by thirty');
+    expect(r.size).toBe('34x30');
+    expect(r.price).toBeNull();
+  });
+
+  it('"thirty four thirty" → size 34x30, no price', () => {
+    const r = parseTranscript('thirty four thirty');
+    expect(r.size).toBe('34x30');
+    expect(r.price).toBeNull();
+  });
+
+  it('"waist 32 inseam 30" → size 32x30', () => {
+    expect(parseTranscript('waist 32 inseam 30').size).toBe('32x30');
+  });
+
+  it('segmented: "Dickies carpenter pants, 34x30, $50"', () => {
+    const r = parseTranscript('Dickies carpenter pants, 34x30, $50');
+    expect(r.size).toBe('34x30');
+    expect(r.price).toBe(50);
+    expect(r.item_name?.toLowerCase()).toContain('dickies');
+  });
+
+  it('"90s Levi jeans 32 by 30 seventy dollars" → all four fields', () => {
+    const r = parseTranscript('90s Levi jeans 32 by 30 seventy dollars');
+    expect(r.size).toBe('32x30');
+    expect(r.decade).toBe("90's");
+    expect(r.price).toBe(70);
+    expect(r.item_name?.toLowerCase()).toContain('levi');
+  });
+
+  // Guards: prices and decades must not become waist sizes.
+  it('"eighty five dollars" → price 85, size null', () => {
+    const r = parseTranscript('eighty five dollars');
+    expect(r.price).toBe(85);
+    expect(r.size).toBeNull();
+  });
+
+  it('"90s" → decade, size null', () => {
+    const r = parseTranscript('90s');
+    expect(r.decade).toBe("90's");
+    expect(r.size).toBeNull();
+  });
+
+  it('"large" → letter sizes still work', () => {
+    expect(parseTranscript('large').size).toBe('L');
+  });
+});
+
+describe('parseSize — all real-inventory waist combinations', () => {
+  const combos = [
+    '28x30', '29x32', '30x29', '30x32', '30x33', '31x29', '31x31',
+    '32x28', '32x29', '32x30', '32x32', '33x33', '34x30', '34x32',
+    '35x30', '35x31', '35x32', '36x30', '26x31',
+  ];
+  test.each(combos)('"%s" → size %s', (combo) => {
+    expect(parseSize(combo)).toBe(combo);
+    expect(parseTranscript(combo).size).toBe(combo);
   });
 });
 
@@ -753,6 +864,7 @@ describe('Real inventory items - separate recordings', () => {
     const item = sim('$50', 'Dickies carpenter pants', '34x30');
     expect(item.price).toBe(50);
     expect(item.item_name?.toLowerCase()).toContain('dickies');
+    expect(item.size).toBe('34x30');
   });
 });
 
