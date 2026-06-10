@@ -101,13 +101,25 @@ export const STTProxy = {
    * fails to dial — manifests as the worker never receiving /stream even
    * though /token over plain fetch() succeeds.
    */
-  getWebSocketUrl(token: string): string {
+  getWebSocketUrl(token: string, customKeyterms: string[] = []): string {
     const base = getProxyBaseUrl().replace(/^https?:\/\//, '').replace(/\/+$/, '');
-    const qs =
+    let qs =
       `token=${encodeURIComponent(token)}` +
       `&model_id=scribe_v2_realtime` +
       `&language_code=en` +
       `&sample_rate=16000`;
+    // Custom brands ride the /stream URL as repeated keyterms= params.
+    // The Worker merges them custom-first with its base PRIORITY_KEYTERMS
+    // (≤50 total per the ElevenLabs spec); limits are re-enforced here as
+    // defense-in-depth.
+    const terms = customKeyterms
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0 && t.length <= 20)
+      .slice(0, 20);
+    for (const term of terms) {
+      qs += `&keyterms=${encodeURIComponent(term)}`;
+    }
+    console.log('[KEYTERMS] custom brands on WS URL:', terms.length);
     const finalUrl = `wss://${base}/stream?${qs}`;
     console.log('[STT] Proxy WS URL:', finalUrl.replace(/token=[^&]+/, 'token=<redacted>'));
     return finalUrl;

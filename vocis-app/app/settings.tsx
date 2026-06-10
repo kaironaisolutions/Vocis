@@ -8,7 +8,13 @@ import { SecureStorage } from '../src/services/secureStorage';
 import { AppSettingsService, AppSettings } from '../src/services/appSettings';
 import { deleteAllSessions, getSessions } from '../src/db/database';
 import { confirmDestructive } from '../src/services/confirm';
-import { KeytermsService } from '../src/services/keyterms';
+import {
+  addBrand,
+  removeBrand,
+  getCustomBrands,
+  MAX_CUSTOM_BRANDS,
+  MAX_BRAND_LENGTH,
+} from '../src/services/customBrands';
 import * as LocalAuthentication from 'expo-local-authentication';
 
 export default function SettingsScreen() {
@@ -23,48 +29,49 @@ export default function SettingsScreen() {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [hasBiometrics, setHasBiometrics] = useState(false);
-  const [customKeyterms, setCustomKeyterms] = useState<string[]>([]);
-  const [keytermDraft, setKeytermDraft] = useState('');
+  const [customBrands, setCustomBrands] = useState<string[]>([]);
+  const [brandDraft, setBrandDraft] = useState('');
 
   useEffect(() => {
     loadState();
   }, []);
 
   async function loadState() {
-    const [key, savedSettings, sessions, bioHardware, terms] = await Promise.all([
+    const [key, savedSettings, sessions, bioHardware, brands] = await Promise.all([
       SecureStorage.getApiKey(),
       AppSettingsService.get(),
       getSessions(),
       LocalAuthentication.hasHardwareAsync(),
-      KeytermsService.getCustom(),
+      getCustomBrands(),
     ]);
     setHasApiKey(!!key);
     setSettings(savedSettings);
     setSessionCount(sessions.length);
     setHasBiometrics(bioHardware);
-    setCustomKeyterms(terms);
+    setCustomBrands(brands);
   }
 
-  async function handleAddKeyterm() {
-    const trimmed = keytermDraft.trim();
+  async function handleAddBrand() {
+    const trimmed = brandDraft.trim();
     if (!trimmed) return;
-    if (customKeyterms.length >= KeytermsService.MAX_CUSTOM_KEYTERMS) {
+    if (
+      customBrands.length >= MAX_CUSTOM_BRANDS &&
+      !customBrands.some((b) => b.toLowerCase() === trimmed.toLowerCase())
+    ) {
       Alert.alert(
         'Limit reached',
-        `Up to ${KeytermsService.MAX_CUSTOM_KEYTERMS} custom keyterms.`
+        `Up to ${MAX_CUSTOM_BRANDS} custom brands. Remove one to add another.`
       );
       return;
     }
-    const next = [...customKeyterms, trimmed];
-    setCustomKeyterms(next);
-    setKeytermDraft('');
-    await KeytermsService.setCustom(next);
+    const next = await addBrand(trimmed);
+    setCustomBrands(next);
+    setBrandDraft('');
   }
 
-  async function handleRemoveKeyterm(term: string) {
-    const next = customKeyterms.filter((t) => t !== term);
-    setCustomKeyterms(next);
-    await KeytermsService.setCustom(next);
+  async function handleRemoveBrand(brand: string) {
+    const next = await removeBrand(brand);
+    setCustomBrands(next);
   }
 
   async function handleToggleAutoPurge(value: boolean) {
@@ -226,41 +233,52 @@ export default function SettingsScreen() {
         )}
       </Card>
 
-      {/* Voice keyterms — biases the speech recognizer toward your vocabulary. */}
+      {/* Custom Brands — user-taught vocabulary injected as STT keyterms
+          on the next recording. Learned automatically from item-name
+          corrections on the review screen, or added manually here. */}
       <Card style={styles.section}>
-        <Text style={styles.sectionTitle}>Voice Keyterms</Text>
+        <View style={styles.row}>
+          <Text style={styles.sectionTitle}>Custom Brands</Text>
+          <Text style={styles.brandCount}>
+            {customBrands.length} / {MAX_CUSTOM_BRANDS} custom brands
+          </Text>
+        </View>
         <Text style={[styles.sublabel, { marginBottom: Spacing.md }]}>
-          Add brand or item words you say often. Keyterms help the recognizer
-          understand your vocabulary. The default vintage list is always included.
+          Brands you sell that Vocis mishears. These are sent to the speech
+          recognizer on every recording, alongside the built-in vintage list.
         </Text>
 
-        <View style={styles.keytermInputRow}>
+        <View style={styles.brandInputRow}>
           <TextInput
-            style={styles.keytermInput}
-            value={keytermDraft}
-            onChangeText={setKeytermDraft}
-            placeholder="e.g. Stüssy"
+            style={styles.brandInput}
+            value={brandDraft}
+            onChangeText={setBrandDraft}
+            placeholder="+ Add Brand (e.g. Stüssy)"
             placeholderTextColor={Colors.textMuted}
             autoCorrect={false}
             autoCapitalize="words"
-            maxLength={KeytermsService.MAX_KEYTERM_LENGTH}
+            maxLength={MAX_BRAND_LENGTH}
             returnKeyType="done"
-            onSubmitEditing={handleAddKeyterm}
+            onSubmitEditing={handleAddBrand}
           />
-          <Button title="Add" onPress={handleAddKeyterm} variant="primary" size="small" />
+          <Button title="Add" onPress={handleAddBrand} variant="primary" size="small" />
         </View>
 
-        {customKeyterms.length === 0 ? (
-          <Text style={styles.sublabel}>No custom keyterms yet.</Text>
+        {customBrands.length === 0 ? (
+          <Text style={styles.sublabel}>
+            No custom brands yet. Vocis learns automatically when you correct
+            an item name on the session review screen — or add brands above to
+            pre-load them.
+          </Text>
         ) : (
-          <View style={styles.keytermChips}>
-            {customKeyterms.map((term) => (
+          <View style={styles.brandChips}>
+            {customBrands.map((brand) => (
               <TouchableOpacity
-                key={term}
-                style={styles.keytermChip}
-                onPress={() => handleRemoveKeyterm(term)}
+                key={brand}
+                style={styles.brandChip}
+                onPress={() => handleRemoveBrand(brand)}
               >
-                <Text style={styles.keytermChipText}>{term} ×</Text>
+                <Text style={styles.brandChipText}>{brand} ✕</Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -457,13 +475,18 @@ const styles = StyleSheet.create({
     color: Colors.textMuted,
     fontSize: 16,
   },
-  keytermInputRow: {
+  brandCount: {
+    ...Typography.bodySmall,
+    color: Colors.textMuted,
+    marginBottom: Spacing.md,
+  },
+  brandInputRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.sm,
     marginBottom: Spacing.md,
   },
-  keytermInput: {
+  brandInput: {
     flex: 1,
     backgroundColor: Colors.surfaceLight,
     borderRadius: BorderRadius.sm,
@@ -474,12 +497,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
   },
-  keytermChips: {
+  brandChips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.xs,
   },
-  keytermChip: {
+  brandChip: {
     backgroundColor: Colors.surfaceLight,
     borderRadius: BorderRadius.sm,
     paddingHorizontal: Spacing.sm,
@@ -487,7 +510,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
   },
-  keytermChipText: {
+  brandChipText: {
     color: Colors.text,
     fontSize: 13,
   },

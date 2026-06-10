@@ -10,7 +10,7 @@ import {
   mergeItems,
   ParsedItem,
 } from '../services/voiceParser';
-import { KeytermsService } from '../services/keyterms';
+import { getCustomBrands } from '../services/customBrands';
 
 export type RecordingPhase =
   | 'idle'
@@ -415,13 +415,15 @@ export function useRecording(): UseRecordingResult {
       workletNode.current = worklet;
       muteGain.current = gain;
 
-      const keyterms = await KeytermsService.getAll().catch(() => []);
+      // User-taught brands (≤20) ride the /stream URL; the Worker merges
+      // them with its base keyterm list. getCustomBrands never throws.
+      const customBrands = await getCustomBrands();
       sttService.current = new ElevenLabsSTTService({
         onTranscript: handleTranscript,
         onStateChange: handleStateChange,
         onError: handleError,
       });
-      sttService.current.setKeyterms(keyterms);
+      sttService.current.setKeyterms(customBrands);
       await sttService.current.connect();
 
       setIsRecording(true);

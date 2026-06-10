@@ -33,6 +33,9 @@ vocis-app/
 │   │   ├── validation.ts        Validates + sanitises all fields before DB write.
 │   │   ├── deviceSecurity.ts    Jailbreak/root detection via file path checks.
 │   │   ├── appSettings.ts       AsyncStorage settings (auto-purge, export PIN).
+│   │   ├── customBrands.ts      User-taught brand keyterms (≤20). Auto-learned from
+│   │   │                        review-screen corrections; sent as keyterms= on /stream,
+│   │   │                        merged custom-first with Worker base list (50 cap).
 │   │   └── crashReporting.ts    Sentry v8 with PII scrubbing. DSN from env var only.
 │   ├── hooks/
 │   │   ├── useRecording.ts      expo-av recording + ElevenLabsSTTService pipeline.

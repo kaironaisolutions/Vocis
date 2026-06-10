@@ -195,18 +195,20 @@ export class ElevenLabsSTTService {
   private callbacks: STTServiceCallbacks;
   private state: ConnectionState = 'disconnected';
   private sessionTimeout: ReturnType<typeof setTimeout> | null = null;
+  private keyterms: string[] = [];
 
   constructor(callbacks: STTServiceCallbacks) {
     this.callbacks = callbacks;
   }
 
   /**
-   * Kept for callsite compatibility — keyterms are now configured on
-   * the upstream WebSocket URL via the Cloudflare Worker, per the
-   * ElevenLabs Scribe v2 Realtime spec. This method is a no-op.
+   * Set the user's custom brand keyterms for the next connect(). They are
+   * appended to the proxy /stream URL as repeated keyterms= params; the
+   * Worker merges them custom-first with its base PRIORITY_KEYTERMS list
+   * (50-term ElevenLabs cap). Base keyterms remain Worker-owned.
    */
-  setKeyterms(_terms: string[]): void {
-    // Intentional no-op — the Worker owns keyterm injection.
+  setKeyterms(terms: string[]): void {
+    this.keyterms = terms;
   }
 
   private setState(state: ConnectionState) {
@@ -234,7 +236,7 @@ export class ElevenLabsSTTService {
         // PREFERRED: Use backend proxy — API key stays server-side
         console.log('[STT] Using proxy mode');
         const sessionToken = await STTProxy.requestToken();
-        wsUrl = STTProxy.getWebSocketUrl(sessionToken.token);
+        wsUrl = STTProxy.getWebSocketUrl(sessionToken.token, this.keyterms);
       } else {
         // FALLBACK: Direct connection — API key from device Keychain/Keystore
         console.log('[STT] Proxy not configured — falling back to direct mode');

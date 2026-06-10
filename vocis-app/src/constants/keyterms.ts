@@ -1,19 +1,23 @@
 /**
- * VOCIS_KEYTERMS — Domain-vocabulary reference (kept on the app side
- * for the user-extensible Settings UI and as an unstructured reference).
+ * VOCIS_KEYTERMS — Domain-vocabulary reference (unstructured, not used at
+ * runtime). Kept as the curated record of the full inventory vocabulary
+ * that PRIORITY_KEYTERMS (worker/src/index.ts) and the customBrands
+ * skip-lists were distilled from.
  *
- * NOTE: ElevenLabs keyterm biasing is NOT applied from this list at
- * runtime. Per the Scribe v2 Realtime spec, keyterms must be passed as
- * repeated `keyterms=` URL query parameters on the WebSocket connection
- * to ElevenLabs — that happens inside `worker/src/index.ts`
- * (PRIORITY_KEYTERMS), not from the app.
+ * NOTE: ElevenLabs keyterm biasing is NOT applied from this list. Per the
+ * Scribe v2 Realtime spec, keyterms are passed as repeated `keyterms=`
+ * URL query parameters on the WebSocket connection to ElevenLabs. Two
+ * sources reach that URL:
+ *   1. Base list — PRIORITY_KEYTERMS in worker/src/index.ts (Worker-owned)
+ *   2. User-taught custom brands — src/services/customBrands.ts, sent by
+ *      the app on the /stream URL and merged custom-first by the Worker
  *
- * To add a new keyterm that actually reaches ElevenLabs:
+ * To add a new BASE keyterm that reaches ElevenLabs:
  *   1. Add it to PRIORITY_KEYTERMS in worker/src/index.ts
  *   2. Run: cd worker && npx wrangler deploy
  *
  * The ElevenLabs spec caps the per-session list at 50 entries, each
- * ≤20 chars; new entries should respect that.
+ * ≤20 chars; the Worker merge enforces both limits.
  */
 export const VOCIS_KEYTERMS: readonly string[] = [
   // ── HIGH FREQUENCY BRANDS (50+ items) ─────────────────────────────────────

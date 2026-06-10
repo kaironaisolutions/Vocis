@@ -8,6 +8,7 @@ import { getSessionItems, deleteItem, updateItem } from '../../src/db/database';
 import { InventoryItem } from '../../src/types';
 import { validateItem, sanitizeField } from '../../src/services/validation';
 import { confirmDestructive } from '../../src/services/confirm';
+import { learnBrand } from '../../src/services/customBrands';
 
 export default function SessionReviewScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -50,10 +51,17 @@ export default function SessionReviewScreen() {
     }
 
     try {
+      const original = items.find((i) => i.id === sanitized.id);
       await updateItem(sanitized);
       setItems((prev) =>
         prev.map((item) => (item.id === sanitized.id ? sanitized : item))
       );
+      // Auto-learn: a corrected item name usually means STT misheard a
+      // brand — teach it for future recordings. Fire-and-forget;
+      // learnBrand never throws and must never block the save.
+      if (original && original.item_name !== sanitized.item_name) {
+        void learnBrand(sanitized.item_name);
+      }
     } catch {
       Alert.alert('Error', 'Failed to save changes.');
     }

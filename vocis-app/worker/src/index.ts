@@ -74,6 +74,13 @@ const PRIORITY_KEYTERMS: readonly string[] = [
   'dollars',
 ];
 
+// ElevenLabs hard limits + the custom/base slot split. Custom brands from
+// the client fill slots first but are capped so the merge always leaves
+// ≥30 slots for PRIORITY_KEYTERMS above (ordered brands-first).
+const MAX_KEYTERMS = 50;
+const MAX_KEYTERM_LENGTH = 20;
+const MAX_CUSTOM_KEYTERMS = 20;
+
 // Per-device rate tracking — in-memory, per Cloudflare Worker isolate.
 //
 // LIMITATION: Under high load CF may spin up multiple isolates, each with
@@ -360,15 +367,48 @@ function proxyClientToElevenLabs(
 
       // Keyterm biasing — repeated `keyterms=` query parameters per the
       // ElevenLabs Scribe v2 Realtime spec. ≤50 entries, ≤20 chars each.
-      const validKeyterms = PRIORITY_KEYTERMS.filter((k) => k.length <= 20).slice(0, 50);
-      for (const term of validKeyterms) {
+      //
+      // The client may pass its own keyterms= params (user-taught custom
+      // brands, see src/services/customBrands.ts in the app). Custom brands
+      // fill slots FIRST so they're never dropped, but are capped at 20 so
+      // at least 30 slots remain for the base list — core brands (Carhartt,
+      // Nike, Polo) lead PRIORITY_KEYTERMS and always survive the merge.
+      const customKeyterms = requestUrl.searchParams
+        .getAll('keyterms')
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0 && k.length <= MAX_KEYTERM_LENGTH)
+        .slice(0, MAX_CUSTOM_KEYTERMS);
+
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const term of customKeyterms) {
+        const key = term.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(term);
+      }
+      const customCount = merged.length;
+      for (const term of PRIORITY_KEYTERMS) {
+        if (merged.length >= MAX_KEYTERMS) break;
+        if (term.length > MAX_KEYTERM_LENGTH) continue;
+        const key = term.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(term);
+      }
+      for (const term of merged) {
         elevenLabsUrl.searchParams.append('keyterms', term);
       }
+      console.log(
+        '[KEYTERMS] base:', merged.length - customCount,
+        'custom:', customCount,
+        'total:', merged.length
+      );
       // no_verbatim drops filler words server-side ("um", "uh", "like").
       elevenLabsUrl.searchParams.set('no_verbatim', 'true');
 
       const upstreamUrlString = elevenLabsUrl.toString();
-      console.log('[WS] Keyterms in URL:', validKeyterms.length, validKeyterms.slice(0, 5).join(','));
+      console.log('[WS] Keyterms in URL:', merged.length, merged.slice(0, 5).join(','));
       console.log('[WS] Upstream URL (first 300):', upstreamUrlString.slice(0, 300));
       console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
 
