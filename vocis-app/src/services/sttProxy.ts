@@ -1,5 +1,4 @@
 import Constants from 'expo-constants';
-import { SecureStorage } from './secureStorage';
 
 /**
  * STT Proxy client — requests session tokens from the Cloudflare Worker
@@ -123,24 +122,5 @@ export const STTProxy = {
     const finalUrl = `wss://${base}/stream?${qs}`;
     console.log('[STT] Proxy WS URL:', finalUrl.replace(/token=[^&]+/, 'token=<redacted>'));
     return finalUrl;
-  },
-
-  /**
-   * Build the direct ElevenLabs WebSocket URL (fallback mode).
-   * Used when no proxy is configured and API key is stored locally.
-   */
-  async getDirectWebSocketUrl(): Promise<string | null> {
-    console.log('[STT] WARNING: Using direct ElevenLabs connection (no proxy configured)');
-    const apiKey = await SecureStorage.getApiKey();
-    if (!apiKey) {
-      console.log('[STT] No local API key found');
-      return null;
-    }
-    // xi_api_key is the correct ElevenLabs query param name for WebSocket auth.
-    // The key is intentionally in the URL because React Native's WebSocket
-    // implementation does not support custom headers.
-    const url = `wss://api.elevenlabs.io/v1/speech-to-text/realtime?xi_api_key=${apiKey}&model_id=scribe_v2_realtime&language_code=en&sample_rate=16000`;
-    console.log('[STT] Direct WS URL: wss://api.elevenlabs.io/v1/speech-to-text/realtime?xi_api_key=<redacted>&...');
-    return url;
   },
 };

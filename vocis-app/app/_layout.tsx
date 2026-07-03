@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { Alert } from 'react-native';
-import { Stack } from 'expo-router';
+import { Alert, Text, TouchableOpacity } from 'react-native';
+import { Stack, router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Colors } from '../src/constants/theme';
 import { useAutoPurge } from '../src/hooks/useAutoPurge';
@@ -53,7 +53,19 @@ function AppLayout() {
       >
         <Stack.Screen
           name="index"
-          options={{ title: 'Vocis', headerTitleAlign: 'center' }}
+          options={{
+            title: 'Vocis',
+            headerTitleAlign: 'center',
+            headerRight: () => (
+              <TouchableOpacity
+                onPress={() => router.push('/settings')}
+                accessibilityLabel="Settings"
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <Text style={{ color: Colors.text, fontSize: 20 }}>⚙</Text>
+              </TouchableOpacity>
+            ),
+          }}
         />
         <Stack.Screen
           name="record"

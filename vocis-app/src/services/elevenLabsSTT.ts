@@ -230,26 +230,17 @@ export class ElevenLabsSTTService {
     this.setState('connecting');
 
     try {
-      let wsUrl: string;
-
-      if (STTProxy.isEnabled()) {
-        // PREFERRED: Use backend proxy — API key stays server-side
-        console.log('[STT] Using proxy mode');
-        const sessionToken = await STTProxy.requestToken();
-        wsUrl = STTProxy.getWebSocketUrl(sessionToken.token, this.keyterms);
-      } else {
-        // FALLBACK: Direct connection — API key from device Keychain/Keystore
-        console.log('[STT] Proxy not configured — falling back to direct mode');
-        const directUrl = await STTProxy.getDirectWebSocketUrl();
-        if (!directUrl) {
-          this.callbacks.onError(
-            'No API key configured. Go to Settings to add your ElevenLabs API key.'
-          );
-          this.setState('disconnected');
-          return;
-        }
-        wsUrl = directUrl;
+      // Proxy is the ONLY connection mode — the ElevenLabs API key lives in
+      // the Cloudflare Worker and must never be on the client.
+      if (!STTProxy.isEnabled()) {
+        this.callbacks.onError(
+          'Speech service is not configured. Please update the app.'
+        );
+        this.setState('disconnected');
+        return;
       }
+      const sessionToken = await STTProxy.requestToken();
+      const wsUrl = STTProxy.getWebSocketUrl(sessionToken.token, this.keyterms);
 
       // Enforce TLS — reject non-encrypted connections
       if (!wsUrl.startsWith('wss://')) {

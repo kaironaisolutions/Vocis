@@ -16,7 +16,7 @@ vocis-app/
 │   ├── record.tsx               Recording screen — mic button, live transcript, item preview.
 │   ├── export.tsx               Export screen — format picker + delivery method.
 │   ├── session/[id].tsx         Session review — item list, edit, delete, export button.
-│   ├── settings.tsx             API key, auto-purge, biometric export lock, delete all.
+│   ├── settings.tsx             Custom brands, auto-purge, biometric export lock, delete all.
 │   └── legal/
 │       ├── licenses.tsx         Open source license list.
 │       ├── privacy.tsx          Privacy policy (GDPR/CCPA compliant).
@@ -25,7 +25,9 @@ vocis-app/
 │   ├── services/
 │   │   ├── elevenLabsSTT.ts     WebSocket STT client. Rate limiting (persistent). Token auth.
 │   │   ├── sttProxy.ts          Requests session tokens from Cloudflare Worker.
-│   │   ├── secureStorage.ts     iOS Keychain / Android Keystore. API key + DB key storage.
+│   │   ├── secureStorage.ts     iOS Keychain / Android Keystore. DB key + secure settings flags.
+│   │   ├── secureStorage.web.ts Web fallback — same API, localStorage-backed (expo-secure-store
+│   │   │                        has an empty web stub; calling it crashes on web).
 │   │   ├── voiceParser.ts       Parses spoken text → { size, decade, item_name, price }.
 │   │   ├── csvGenerator.ts      Generates CSV in 3 formats via PapaParse. CSV injection safe.
 │   │   ├── exportDelivery.ts    Writes CSV to temp file → email / share / save-to-Files.
@@ -43,7 +45,8 @@ vocis-app/
 │   │   └── useDeviceSecurityCheck.ts  Jailbreak/root alert on launch.
 │   ├── db/
 │   │   ├── database.ts          expo-sqlite v16 + SQLCipher encryption. CRUD for sessions/items.
-│   │   └── database.web.ts      In-memory DB for web/testing. No persistence.
+│   │   └── database.web.ts      Web DB — in-memory Maps persisted to localStorage
+│   │   │                        (key vocis_web_db_v1). Survives refresh; unencrypted.
 │   ├── components/
 │   │   ├── Button.tsx           Styled touchable. Variants: primary/secondary/outline/danger.
 │   │   ├── Card.tsx             Surface container with border + shadow.
@@ -180,7 +183,7 @@ eas submit --platform ios
 - Key stored in iOS Keychain (`WHEN_UNLOCKED_THIS_DEVICE_ONLY`) via `expo-secure-store`
 - Key in: `SecureStore` key `vocis_db_key_v1`
 - Encryption applied via `PRAGMA key = '...'` immediately after `openDatabaseAsync()`
-- Web platform skips encryption (in-memory DB used for web testing only)
+- Web platform skips encryption — web DB persists to localStorage unencrypted (no SQLCipher equivalent in the browser)
 
 ---
 

@@ -4,7 +4,6 @@ import { useRouter } from 'expo-router';
 import { Colors, Typography, Spacing, BorderRadius } from '../src/constants/theme';
 import { Button } from '../src/components/Button';
 import { Card } from '../src/components/Card';
-import { SecureStorage } from '../src/services/secureStorage';
 import { AppSettingsService, AppSettings } from '../src/services/appSettings';
 import { deleteAllSessions, getSessions } from '../src/db/database';
 import { confirmDestructive } from '../src/services/confirm';
@@ -24,10 +23,7 @@ export default function SettingsScreen() {
     autoPurgeDays: 90,
     exportPinEnabled: false,
   });
-  const [hasApiKey, setHasApiKey] = useState(false);
   const [sessionCount, setSessionCount] = useState(0);
-  const [apiKeyInput, setApiKeyInput] = useState('');
-  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [hasBiometrics, setHasBiometrics] = useState(false);
   const [customBrands, setCustomBrands] = useState<string[]>([]);
   const [brandDraft, setBrandDraft] = useState('');
@@ -37,14 +33,12 @@ export default function SettingsScreen() {
   }, []);
 
   async function loadState() {
-    const [key, savedSettings, sessions, bioHardware, brands] = await Promise.all([
-      SecureStorage.getApiKey(),
+    const [savedSettings, sessions, bioHardware, brands] = await Promise.all([
       AppSettingsService.get(),
       getSessions(),
       LocalAuthentication.hasHardwareAsync(),
       getCustomBrands(),
     ]);
-    setHasApiKey(!!key);
     setSettings(savedSettings);
     setSessionCount(sessions.length);
     setHasBiometrics(bioHardware);
@@ -99,45 +93,10 @@ export default function SettingsScreen() {
     );
   }
 
-  async function handleSaveApiKey() {
-    const trimmed = apiKeyInput.trim();
-    if (!trimmed) {
-      Alert.alert('Invalid Key', 'Please enter a valid API key.');
-      return;
-    }
-    try {
-      await SecureStorage.setApiKey(trimmed);
-      setHasApiKey(true);
-      setApiKeyInput('');
-      setShowApiKeyInput(false);
-      Alert.alert('Saved', 'API key stored securely in device keychain.');
-    } catch (error) {
-      Alert.alert('Invalid Key', error instanceof Error ? error.message : 'Failed to save API key.');
-    }
-  }
-
   async function handleToggleExportPin(value: boolean) {
     const updated = { ...settings, exportPinEnabled: value };
     setSettings(updated);
     await AppSettingsService.setExportPin(value);
-  }
-
-  async function handleRemoveApiKey() {
-    Alert.alert(
-      'Remove API Key',
-      'This will remove the stored API key. You will need to re-enter it to use voice recording.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: async () => {
-            await SecureStorage.deleteApiKey();
-            setHasApiKey(false);
-          },
-        },
-      ]
-    );
   }
 
   async function handleDeleteAll() {
@@ -165,74 +124,6 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
-      {/* API Configuration */}
-      <Card style={styles.section}>
-        <Text style={styles.sectionTitle}>API Configuration</Text>
-        <View style={styles.row}>
-          <View style={styles.rowText}>
-            <Text style={styles.label}>ElevenLabs API Key</Text>
-            <Text style={styles.sublabel}>
-              {hasApiKey ? 'Stored securely in device keychain' : 'No key configured'}
-            </Text>
-          </View>
-          {hasApiKey ? (
-            <View style={styles.keyActions}>
-              <Button
-                title="Change"
-                onPress={() => setShowApiKeyInput(true)}
-                variant="outline"
-                size="small"
-              />
-              <Button
-                title="Remove"
-                onPress={handleRemoveApiKey}
-                variant="danger"
-                size="small"
-              />
-            </View>
-          ) : (
-            <Button
-              title="Set Key"
-              onPress={() => setShowApiKeyInput(true)}
-              variant="primary"
-              size="small"
-            />
-          )}
-        </View>
-
-        {showApiKeyInput && (
-          <View style={styles.apiKeyInputArea}>
-            <TextInput
-              style={styles.apiKeyInput}
-              placeholder="Paste your ElevenLabs API key"
-              placeholderTextColor={Colors.textMuted}
-              value={apiKeyInput}
-              onChangeText={setApiKeyInput}
-              secureTextEntry
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <View style={styles.apiKeyButtons}>
-              <Button
-                title="Cancel"
-                onPress={() => {
-                  setShowApiKeyInput(false);
-                  setApiKeyInput('');
-                }}
-                variant="secondary"
-                size="small"
-              />
-              <Button
-                title="Save"
-                onPress={handleSaveApiKey}
-                variant="primary"
-                size="small"
-              />
-            </View>
-          </View>
-        )}
-      </Card>
-
       {/* Custom Brands — user-taught vocabulary injected as STT keyterms
           on the next recording. Learned automatically from item-name
           corrections on the review screen, or added manually here. */}
@@ -424,32 +315,6 @@ const styles = StyleSheet.create({
   sublabelTappable: {
     color: Colors.accent,
     textDecorationLine: 'underline',
-  },
-  keyActions: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-  },
-  apiKeyInputArea: {
-    marginTop: Spacing.md,
-    paddingTop: Spacing.md,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-  },
-  apiKeyInput: {
-    backgroundColor: Colors.surfaceLight,
-    borderRadius: BorderRadius.sm,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm + 2,
-    color: Colors.text,
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  apiKeyButtons: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: Spacing.sm,
-    marginTop: Spacing.sm,
   },
   about: {
     alignItems: 'center',

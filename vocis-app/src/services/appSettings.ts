@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as SecureStore from 'expo-secure-store';
+// Platform-split wrapper — never import expo-secure-store directly; its web
+// build is an empty stub and any call crashes in the browser.
+import { SecureStorage } from './secureStorage';
 
 const KEYS = {
   AUTO_PURGE_ENABLED: 'vocis_auto_purge_enabled',
@@ -31,7 +33,7 @@ export const AppSettingsService = {
       AsyncStorage.getItem(KEYS.AUTO_PURGE_ENABLED),
       AsyncStorage.getItem(KEYS.AUTO_PURGE_DAYS),
       // Export PIN is in SecureStore — not AsyncStorage — to prevent tampering.
-      SecureStore.getItemAsync(KEYS.EXPORT_PIN_ENABLED),
+      SecureStorage.getItem(KEYS.EXPORT_PIN_ENABLED),
     ]);
 
     return {
@@ -62,9 +64,7 @@ export const AppSettingsService = {
   },
 
   async setExportPin(enabled: boolean): Promise<void> {
-    await SecureStore.setItemAsync(KEYS.EXPORT_PIN_ENABLED, String(enabled), {
-      keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-    });
+    await SecureStorage.setItem(KEYS.EXPORT_PIN_ENABLED, String(enabled));
   },
 
   async getLastPurgeDate(): Promise<string | null> {

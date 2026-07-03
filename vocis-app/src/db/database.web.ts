@@ -1,13 +1,62 @@
 /**
- * In-memory database for web testing.
- * Mirrors the same API as database.ts but stores data in memory.
- * Data does not persist across page refreshes — this is for testing only.
+ * Web database: in-memory Maps snapshotted to localStorage after every
+ * mutation, so sessions survive refreshes and browser restarts.
+ * Mirrors the same API as database.ts. Unlike the native build, data at
+ * rest is NOT encrypted — localStorage has no SQLCipher equivalent.
  */
 import { InventoryItem, Session } from '../types';
 import { validateItem, sanitizeField } from '../services/validation';
 
+const STORAGE_KEY = 'vocis_web_db_v1';
+
 const sessions: Map<string, { id: string; created_at: string }> = new Map();
 const items: Map<string, InventoryItem> = new Map();
+
+function storage(): Storage | null {
+  // Accessing localStorage can throw (SSR, cookies disabled, private mode).
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function persist(): void {
+  const store = storage();
+  if (!store) return;
+  try {
+    store.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        sessions: Array.from(sessions.values()),
+        items: Array.from(items.values()),
+      })
+    );
+  } catch (e) {
+    // Quota exceeded or storage revoked — keep serving from memory.
+    console.warn('[DB] Failed to persist to localStorage:', e);
+  }
+}
+
+function hydrate(): void {
+  const store = storage();
+  if (!store) return;
+  try {
+    const raw = store.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const snapshot = JSON.parse(raw);
+    for (const session of snapshot.sessions ?? []) {
+      if (session?.id && session?.created_at) sessions.set(session.id, session);
+    }
+    for (const item of snapshot.items ?? []) {
+      if (item?.id && item?.session_id) items.set(item.id, item);
+    }
+  } catch (e) {
+    console.warn('[DB] Corrupt localStorage snapshot, starting fresh:', e);
+  }
+}
+
+hydrate();
 
 function generateUUID(): string {
   // Web Crypto API is available in all modern browsers — CSPRNG-backed.
@@ -17,6 +66,7 @@ function generateUUID(): string {
 export async function createSession(): Promise<string> {
   const id = generateUUID();
   sessions.set(id, { id, created_at: new Date().toISOString() });
+  persist();
   return id;
 }
 
@@ -42,11 +92,13 @@ export async function deleteSession(sessionId: string): Promise<void> {
     if (item.session_id === sessionId) items.delete(id);
   }
   sessions.delete(sessionId);
+  persist();
 }
 
 export async function deleteAllSessions(): Promise<void> {
   sessions.clear();
   items.clear();
+  persist();
 }
 
 export async function purgeOldSessions(daysOld: number = 90): Promise<void> {
@@ -60,6 +112,7 @@ export async function purgeOldSessions(daysOld: number = 90): Promise<void> {
       sessions.delete(id);
     }
   }
+  persist();
 }
 
 export async function addItem(
@@ -85,6 +138,7 @@ export async function addItem(
     logged_at: new Date().toISOString(),
   };
   items.set(id, full);
+  persist();
   return id;
 }
 
@@ -99,9 +153,11 @@ export async function getSessionItems(
 export async function updateItem(item: InventoryItem): Promise<void> {
   if (items.has(item.id)) {
     items.set(item.id, item);
+    persist();
   }
 }
 
 export async function deleteItem(itemId: string): Promise<void> {
   items.delete(itemId);
+  persist();
 }

@@ -1,50 +1,23 @@
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 
-const API_KEY_STORAGE_KEY = 'vocis_elevenlabs_api_key';
 const DB_ENCRYPTION_KEY = 'vocis_db_encryption_key';
-
-// ElevenLabs API keys follow a known format
-const API_KEY_PATTERN = /^[a-zA-Z0-9_-]{20,}$/;
 
 export const SecureStorage = {
   /**
-   * Store the ElevenLabs API key in iOS Keychain / Android Keystore.
-   * Key is validated before storage. Never stored in source code or app bundle.
+   * Generic secure key-value access for other services (e.g. app settings
+   * flags that must live in Keychain/Keystore rather than AsyncStorage).
+   * Import this instead of expo-secure-store directly — its web build is an
+   * empty stub, so direct calls crash in the browser.
    */
-  async setApiKey(apiKey: string): Promise<void> {
-    const trimmed = apiKey.trim();
+  async getItem(key: string): Promise<string | null> {
+    return SecureStore.getItemAsync(key);
+  },
 
-    if (!trimmed) {
-      throw new Error('API key cannot be empty.');
-    }
-
-    if (!API_KEY_PATTERN.test(trimmed)) {
-      throw new Error(
-        'Invalid API key format. Key should contain only alphanumeric characters, hyphens, and underscores.'
-      );
-    }
-
-    await SecureStore.setItemAsync(API_KEY_STORAGE_KEY, trimmed, {
+  async setItem(key: string, value: string): Promise<void> {
+    await SecureStore.setItemAsync(key, value, {
       keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
     });
-  },
-
-  async getApiKey(): Promise<string | null> {
-    return SecureStore.getItemAsync(API_KEY_STORAGE_KEY);
-  },
-
-  async deleteApiKey(): Promise<void> {
-    await SecureStore.deleteItemAsync(API_KEY_STORAGE_KEY);
-  },
-
-  /**
-   * Mask an API key for safe display in UI or logs.
-   * Shows only the last 4 characters.
-   */
-  maskApiKey(key: string): string {
-    if (key.length <= 4) return '****';
-    return `${'*'.repeat(key.length - 4)}${key.slice(-4)}`;
   },
 
   /**
