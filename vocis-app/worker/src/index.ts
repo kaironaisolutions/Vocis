@@ -396,19 +396,24 @@ function proxyClientToElevenLabs(
         seen.add(key);
         merged.push(term);
       }
-      for (const term of merged) {
+      // Hard cap AFTER merging. The fill loop above already stops at
+      // MAX_KEYTERMS, but slice defensively so the ≤50 invariant survives
+      // any future edit to the merge — ElevenLabs rejects sessions over 50.
+      // Customs sit at the front of `merged`, so they always survive the cut.
+      const finalKeyterms = merged.slice(0, MAX_KEYTERMS);
+      for (const term of finalKeyterms) {
         elevenLabsUrl.searchParams.append('keyterms', term);
       }
       console.log(
-        '[KEYTERMS] base:', merged.length - customCount,
-        'custom:', customCount,
-        'total:', merged.length
+        '[KEYTERMS] custom:', customCount,
+        'base:', finalKeyterms.length - customCount,
+        'total:', finalKeyterms.length
       );
       // no_verbatim drops filler words server-side ("um", "uh", "like").
       elevenLabsUrl.searchParams.set('no_verbatim', 'true');
 
       const upstreamUrlString = elevenLabsUrl.toString();
-      console.log('[WS] Keyterms in URL:', merged.length, merged.slice(0, 5).join(','));
+      console.log('[WS] Keyterms in URL:', finalKeyterms.length, finalKeyterms.slice(0, 5).join(','));
       console.log('[WS] Upstream URL (first 300):', upstreamUrlString.slice(0, 300));
       console.log('[WS] Connecting to ElevenLabs Scribe v2 Realtime...');
 
